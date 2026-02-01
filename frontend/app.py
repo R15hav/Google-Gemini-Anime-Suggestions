@@ -1,7 +1,16 @@
+import os
 import streamlit as st
 import requests
 import time
 from datetime import datetime, timedelta
+
+# 1. Get the host (e.g., "anime-api.onrender.com" or "localhost:8000")
+backend_host = os.getenv("BACKEND_HOST", "localhost:8000")
+
+# 2. Construct the full URL
+# If running locally (localhost), use http. On Render, use https.
+protocol = "http" if "localhost" in backend_host else "https"
+BACKEND_URL = f"{protocol}://{backend_host}"
 
 # 1. Initialize Session State
 if "last_free_request" not in st.session_state:
@@ -80,7 +89,7 @@ if st.button(button_label, disabled=(is_locked and not user_api_key), type="prim
         with st.spinner(f"Analyzing {username}'s taste with {model_choice}..."):
             try:
                 # Replace with your actual FastAPI production URL after hosting
-                backend_url = f"http://localhost:8000/recommend/{username}"
+                backend_url = f"{BACKEND_URL}/recommend/{username}"
                 headers = {"x-gemini-api-key": user_api_key}
                 payload = {"model_choice": model_choice}
                 

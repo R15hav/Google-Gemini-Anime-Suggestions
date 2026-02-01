@@ -53,8 +53,8 @@ services:
       uv run streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
     
     envVars:
-      - key: BACKEND_URL
+      - key: BACKEND_HOST  # <--- Renamed for clarity (optional, but good practice)
         fromService:
           type: web
           name: anime-api
-          property: url
+          property: host   # <--- THE FIX: Change 'url' to 'host'
