@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Header, Request, HTTPException
-from services.anilist import fetch_user_watchlist, fetch_candidates
-from services.gemini import finalize_recommendations, get_search_params
+from backend.services.anilist import fetch_user_watchlist, fetch_candidates
+from backend.services.gemini import finalize_recommendations, get_search_params
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
