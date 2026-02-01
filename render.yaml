@@ -36,7 +36,7 @@ services:
   # 2. The Streamlit Frontend
   # ---------------------------------------
   - type: web
-    name: anime-ui
+    name: anilist-anime-suggestions
     runtime: python
     region: singapore
     plan: free
