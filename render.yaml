@@ -5,26 +5,30 @@ services:
   - type: web
     name: anime-api
     runtime: python
-    region: singapore
+    region: singapore # or your preferred region
     plan: free
-    rootDirectory: backend
+    
+    # CRITICAL: Leave Root Directory as default (.) so it finds uv.lock
+    # render automatically defaults to root if this is omitted.
     
     # 1. Install uv
-    # 2. Use uv to install deps system-wide (simplest for containers)
+    # 2. Sync dependencies (creates .venv in root)
     buildCommand: |
       curl -LsSf https://astral.sh/uv/install.sh | sh
       source $HOME/.cargo/env
-      uv pip install --system -r pyproject.toml
-      # OR if you exported requirements: uv pip install --system -r requirements.txt
+      uv sync --frozen
     
-    # Run uvicorn normally
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # Run uvicorn using 'uv run' which automatically uses the .venv
+    # We point to 'backend.main:app' because we are running from the root
+    startCommand: |
+      source $HOME/.cargo/env
+      uv run uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     
     envVars:
       - key: GEMINI_API_KEY
         sync: false
       - key: PYTHON_VERSION
-        value: 3.12.0 # uv requires a specific python version often
+        value: 3.12.0 # Matches your directory structure image
 
   # ---------------------------------------
   # 2. The Streamlit Frontend
@@ -34,15 +38,19 @@ services:
     runtime: python
     region: singapore
     plan: free
-    rootDirectory: .
     
-    # Install uv and dependencies
+    # CRITICAL: Run from root to access the shared .venv and lockfile
+    
+    # Same build command as backend
     buildCommand: |
       curl -LsSf https://astral.sh/uv/install.sh | sh
       source $HOME/.cargo/env
-      uv pip install --system -r pyproject.toml
+      uv sync --frozen
     
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    # Run streamlit pointing to the file inside the frontend folder
+    startCommand: |
+      source $HOME/.cargo/env
+      uv run streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
     
     envVars:
       - key: BACKEND_URL
