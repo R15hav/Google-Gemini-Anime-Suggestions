@@ -21,7 +21,7 @@ services:
     # Run uvicorn using 'uv run' which automatically uses the .venv
     # We point to 'backend.main:app' because we are running from the root
     startCommand: |
-      source $HOME/.cargo/env
+      export PATH="$HOME/.cargo/bin:$PATH"
       uv run uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     
     envVars:
@@ -49,7 +49,7 @@ services:
     
     # Run streamlit pointing to the file inside the frontend folder
     startCommand: |
-      source $HOME/.cargo/env
+      export PATH="$HOME/.cargo/bin:$PATH"
       uv run streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
     
     envVars:

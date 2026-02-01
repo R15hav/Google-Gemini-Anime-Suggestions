@@ -12,8 +12,3 @@ dependencies = [
     "slowapi>=0.1.9",
     "streamlit>=1.53.1",
 ]
-
-[tool.uv.workspace]
-members = [
-    "frontend",
-]
