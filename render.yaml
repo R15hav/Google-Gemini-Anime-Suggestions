@@ -28,7 +28,9 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: PYTHON_VERSION
-        value: 3.12.0 # Matches your directory structure image
+        value: 3.12.0
+      - key: PYTHONPATH
+        value: ./backend
 
   # ---------------------------------------
   # 2. The Streamlit Frontend
