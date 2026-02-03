@@ -1,16 +1,9 @@
-import os
 import streamlit as st
 import requests
 import time
 from datetime import datetime, timedelta
 
-# 1. Get the host (e.g., "anime-api.onrender.com" or "localhost:8000")
-backend_host = os.getenv("BACKEND_HOST", "localhost:8000")
-
-# 2. Construct the full URL
-# If running locally (localhost), use http. On Render, use https.
-protocol = "http" if "localhost" in backend_host else "https"
-BACKEND_URL = f"{protocol}://{backend_host}"
+BACKEND_URL = "http://127.0.0.1:8000"
 
 # 1. Initialize Session State
 if "last_free_request" not in st.session_state:

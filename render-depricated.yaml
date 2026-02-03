@@ -1,0 +1,62 @@
+# services:
+#   # ---------------------------------------
+#   # 1. The FastAPI Backend
+#   # ---------------------------------------
+#   - type: web
+#     name: anime-api
+#     runtime: python
+#     region: singapore # or your preferred region
+#     plan: free
+    
+#     # CRITICAL: Leave Root Directory as default (.) so it finds uv.lock
+#     # render automatically defaults to root if this is omitted.
+    
+#     # 1. Install uv
+#     # 2. Sync dependencies (creates .venv in root)
+#     buildCommand: |
+#       curl -LsSf https://astral.sh/uv/install.sh | sh
+#       source $HOME/.cargo/env
+#       uv sync --frozen
+    
+#     # Run uvicorn using 'uv run' which automatically uses the .venv
+#     # We point to 'backend.main:app' because we are running from the root
+#     startCommand: |
+#       export PATH="$HOME/.cargo/bin:$PATH"
+#       uv run uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    
+#     envVars:
+#       - key: GEMINI_API_KEY
+#         sync: false
+#       - key: PYTHON_VERSION
+#         value: 3.12.0
+#       - key: PYTHONPATH
+#         value: ./backend
+
+#   # ---------------------------------------
+#   # 2. The Streamlit Frontend
+#   # ---------------------------------------
+#   - type: web
+#     name: anilist-anime-suggestions
+#     runtime: python
+#     region: singapore
+#     plan: free
+    
+#     # CRITICAL: Run from root to access the shared .venv and lockfile
+    
+#     # Same build command as backend
+#     buildCommand: |
+#       curl -LsSf https://astral.sh/uv/install.sh | sh
+#       source $HOME/.cargo/env
+#       uv sync --frozen
+    
+#     # Run streamlit pointing to the file inside the frontend folder
+#     startCommand: |
+#       export PATH="$HOME/.cargo/bin:$PATH"
+#       uv run streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
+    
+#     envVars:
+#       - key: BACKEND_HOST  # <--- Renamed for clarity (optional, but good practice)
+#         fromService:
+#           type: web
+#           name: anime-api
+#           property: host   # <--- THE FIX: Change 'url' to 'host'
