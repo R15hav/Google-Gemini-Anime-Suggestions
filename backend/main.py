@@ -1,56 +1,98 @@
-from fastapi import FastAPI, Header, Request, HTTPException
-from backend.services.anilist import fetch_user_watchlist, fetch_candidates
-from backend.services.gemini import finalize_recommendations, get_search_params
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
-def get_free_tier_ip(request: Request):
-    """
-    Returns the IP address ONLY if the user has NO API Key.
-    If they have a key, returns None (skipping this 1/hour limit).
-    """
-    if request.headers.get("x-gemini-api-key"):
-        return None  # User is premium, skip the "Free" limit
-    return get_remote_address(request)  # User is free, bucket by IP
+from backend.models import Recommendation
+from backend.services.anilist import fetch_candidates, fetch_user_watchlist, validate_user
+from backend.services.gemini import QuotaExceededError, finalize_recommendations, get_search_params
 
-def get_premium_tier_id(request: Request):
-    """
-    Returns the IP (or Key) ONLY if the user HAS an API Key.
-    If no key, returns None (skipping this 1000/minute limit).
-    """
-    if request.headers.get("x-gemini-api-key"):
-        return get_remote_address(request)  # Apply high limit to this IP
-    return None  # User is free, skip the "Premium" check
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Anime Sensei API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-MODEL = "gemini-2.5-flash-lite"
-
-@app.get("/recommend/{username}")
-# Rule 1: Free Users -> 1 Request per Hour
-@limiter.limit("1/hour", key_func=get_free_tier_ip)
-# Rule 2: Premium Users -> 1000 Requests per Minute (Effective Unlimited)
-@limiter.limit("1000/minute", key_func=get_premium_tier_id)
-async def get_recs(request: Request, username: str, model_choice: str = MODEL, x_gemini_api_key: str = Header(None)):
-    # 1. Fetch user's history
-    user_data = fetch_user_watchlist(username)
-    completed = [e["media"]["title"]["romaji"] for e in user_data["data"]["MediaListCollection"]["lists"][0]["entries"]]
-    dropped   = [e["media"]["title"]["romaji"] for e in user_data["data"]["MediaListCollection"]["lists"][1]["entries"]]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
-    # 2. Ask Gemini what we should look for today
-    search_queries = get_search_params(completed, dropped, model_choice, x_gemini_api_key)
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-    # 3. Gather a pool of candidates from AniList
-    candidate_pool = []
+
+@app.get("/validate/{username}")
+async def validate(username: str):
+    result = validate_user(username)
+    if result["error"]:
+        code = 404 if not result["exists"] else 403
+        raise HTTPException(status_code=code, detail=result["error"])
+    if result["completed_count"] == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No completed anime found. Mark some anime as completed on AniList first.",
+        )
+    return {"username": username, "completed_count": result["completed_count"]}
+
+
+@app.get("/recommend/{username}", response_model=list[Recommendation])
+@limiter.limit("30/minute")
+async def get_recs(
+    request: Request,
+    username: str,
+    model_choice: str = DEFAULT_MODEL,
+    x_gemini_api_key: str = Header(None),
+):
+    if not x_gemini_api_key:
+        raise HTTPException(status_code=401, detail="A Gemini API key is required. Get your free key at aistudio.google.com.")
+
+    # 1. Validate user before spending any Gemini quota
+    validation = validate_user(username)
+    if validation["error"]:
+        code = 404 if not validation["exists"] else 403
+        raise HTTPException(status_code=code, detail=validation["error"])
+    if validation["completed_count"] == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No completed anime found. Mark some anime as completed on AniList first.",
+        )
+
+    # 2. Fetch user history
+    try:
+        completed, dropped = fetch_user_watchlist(username)
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to reach AniList. Try again in a moment.")
+
+    # 3. Ask Gemini for search vectors
+    try:
+        search_queries = get_search_params(completed, dropped, model_choice, x_gemini_api_key)
+    except QuotaExceededError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model.",
+        )
+
+    # 4. Gather candidate pool from AniList
+    candidate_pool: list = []
     for q in search_queries:
-        candidate_pool.extend(fetch_candidates(genre=q.get('genre'), tag=q.get('tag')))
+        candidate_pool.extend(fetch_candidates(genre=q.get("genre"), tag=q.get("tag")))
 
-    # 4. Let Gemini pick the best 'randomized' winners
-    final_recs = finalize_recommendations(candidate_pool, completed + dropped, model_choice, x_gemini_api_key)
-    print(final_recs)
+    # 5. Let Gemini pick the best 5
+    try:
+        final_recs = finalize_recommendations(candidate_pool, completed + dropped, model_choice, x_gemini_api_key)
+    except QuotaExceededError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model.",
+        )
+
     return final_recs

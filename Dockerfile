@@ -1,33 +1,31 @@
-# Use the same Python version as your local environment
 FROM python:3.12-slim
 
-# 1. Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install curl (needed by start.sh health-check loop)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Install 'uv'
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+# Pin uv version for reproducible builds
+COPY --from=ghcr.io/astral-sh/uv:0.7.3 /uv /bin/uv
 
-# Set working directory
 WORKDIR /app
 
-# 3. Copy dependency files
+# Copy only dependency files first so this layer is cached unless deps change
 COPY pyproject.toml uv.lock ./
 
-# 4. Install dependencies (Corrected Step)
-# We remove '--system'. uv will create a folder named .venv inside /app
-RUN uv sync --frozen
+# Install dependencies into .venv; use copy mode to avoid hardlink warnings
+RUN UV_LINK_MODE=copy uv sync --frozen --no-dev
 
-# 5. CRITICAL FIX: Add the .venv to the global PATH
-# This ensures that typing 'python' or 'uvicorn' automatically uses the installed version
+# Add the venv to PATH for all subsequent RUN / CMD steps
 ENV PATH="/app/.venv/bin:$PATH"
 
-# 6. Copy the rest of your code
+# Keep Python output unbuffered so logs appear in real time
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Copy application code (.dockerignore excludes .venv, .env, .git, __pycache__)
 COPY . .
 
-# 7. Copy and prepare the start script
-COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
 ENV PORT=10000

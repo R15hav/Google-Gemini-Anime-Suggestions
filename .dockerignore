@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[oc]
+*.pyo
+
+# Virtual environment — Docker installs its own via uv sync
+.venv/
+
+# Secrets and local config
+.env
+*.env.local
+
+# Git history
+.git/
+.gitignore
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Docs and CI artifacts not needed at runtime
+*.md
+render-depricated.yaml
+render.yaml
+CLAUDE.md

@@ -1,23 +1,24 @@
 #!/bin/bash
+set -e
 
-echo "🚀 Starting Deployment..."
+echo "🚀 Starting Anime Sensei..."
 
-# 1. Start FastAPI in the background (&)
-# We bind to 127.0.0.1 because only Streamlit (running in the same container) needs to reach it.
-# We explicitly call 'python -m uvicorn' since we installed to system python.
+# Start FastAPI on localhost (only Streamlit needs to reach it)
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 &
-
-# Capture the Process ID (PID) of FastAPI
 FASTAPI_PID=$!
 
-# 2. Wait for FastAPI to wake up
-echo "⏳ Waiting for Backend to start..."
-sleep 5
+# Wait for FastAPI to be ready instead of sleeping a fixed amount
+echo "⏳ Waiting for backend to be healthy..."
+until curl -sf http://127.0.0.1:8000/health > /dev/null; do
+  sleep 1
+done
+echo "✅ Backend is up."
 
-# 3. Start Streamlit in the foreground
-# Streamlit listens on the public $PORT assigned by Render
-echo "🎨 Starting Streamlit Frontend on port $PORT..."
-python -m streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
+# Start Streamlit on the public port assigned by the hosting platform
+echo "🎨 Starting frontend on port ${PORT:-10000}..."
+python -m streamlit run frontend/app.py \
+  --server.port "${PORT:-10000}" \
+  --server.address 0.0.0.0
 
-# (Optional) If Streamlit crashes, kill FastAPI too so the container restarts cleanly
+# If Streamlit exits, bring down FastAPI so the container restarts cleanly
 kill $FASTAPI_PID

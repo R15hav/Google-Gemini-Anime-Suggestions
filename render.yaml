@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: anime-sensei
+    runtime: docker
+    plan: free
+    # Streamlit exposes its own /healthz endpoint on the public port
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: "10000"
