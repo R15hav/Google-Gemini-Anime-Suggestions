@@ -406,32 +406,14 @@ with st.sidebar:
 
     if st.session_state["quota_error_model"] == model_choice:
         suggested = next_fallback_model(model_choice)
-        st.markdown(f"""
-        <div style="background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.28);
-                    border-radius:12px; padding:0.6rem 0.85rem; font-size:0.8rem;
-                    color:#fcd34d; line-height:1.5;">
-            ⚠️ Quota hit. Try <strong>{suggested}</strong>.
-        </div>
-        """, unsafe_allow_html=True)
+        st.warning(f"Quota hit. Try **{suggested}**.", icon="⚠️")
 
     with st.expander("📊 Daily limits"):
-        rows = ""
         for m, lim in FREE_TIER.items():
-            active = "font-weight:600; color:#c4b5fd;" if m == model_choice else "color:rgba(255,255,255,0.5);"
-            rows += f"""
-            <div style="display:flex; justify-content:space-between; align-items:center;
-                        padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.05); {active}">
-                <span style="font-size:0.75rem;">{m}</span>
-                <span style="font-size:0.75rem; opacity:0.7;">~{lim['rpd']//2} recs/day</span>
-            </div>"""
-        st.markdown(f"""
-        <div style="padding:0.25rem 0 0.5rem;">
-            {rows}
-            <div style="font-size:0.7rem; color:rgba(255,255,255,0.3); margin-top:8px;">
-                Resets at midnight UTC · 2 calls per request
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+            recs = lim["rpd"] // 2
+            label = f"**{m}**" if m == model_choice else m
+            st.markdown(f"{label} — ~{recs} recs/day")
+        st.caption("Resets midnight UTC · 2 calls per request")
 
     st.markdown("""
     <div style="margin-top:1.5rem; background:rgba(255,255,255,0.04);
@@ -450,7 +432,7 @@ if st.session_state["quota_error_ts"]:
         quota_lock_msg = fmt_duration(secs)
 
 # ─── Status strip (inline chips) ─────────────────────────────────────────────
-profile_ok = st.session_state.get("validation_result", ("", ""))[0] == "ok"
+profile_ok = (st.session_state.get("validation_result") or ("", ""))[0] == "ok"
 
 key_chip   = ('<span style="color:#6ee7b7;">● Key ready</span>' if user_api_key
               else '<span style="color:#fca5a5;">● No key</span>')
