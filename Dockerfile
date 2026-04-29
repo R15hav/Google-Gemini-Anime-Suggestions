@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # Install curl (needed by start.sh health-check loop)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    curl nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin uv version for reproducible builds
