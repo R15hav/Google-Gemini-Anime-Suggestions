@@ -7,7 +7,6 @@ import type { Recommendation, RecommendationResponse } from './types'
 
 type Stage = 'input' | 'loading' | 'results'
 type Theme = 'light' | 'dark'
-type Accent = 'lavender' | 'peach' | 'mint'
 
 // ─── Model labels + daily usage tracking ─────────────────────────────────────
 
@@ -83,7 +82,7 @@ function CoverPlaceholder({ label, hue = 280, h = 220 }: { label: string; hue?: 
 
 // ─── Input screen ─────────────────────────────────────────────────────────────
 
-function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSubmit, error }: {
+function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSubmit, error, lockedUsername = '' }: {
   apiKey: string
   onApiKeyChange: (k: string) => void
   model: string
@@ -91,10 +90,15 @@ function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSu
   usage: UsageState
   onSubmit: (username: string) => void
   error: string | null
+  lockedUsername?: string
 }) {
   const [username, setUsername] = useState('')
   const [showKey, setShowKey] = useState(false)
-  const canSubmit = username.trim().length > 0 && apiKey.trim().length > 0
+
+  useEffect(() => { if (lockedUsername) setUsername(lockedUsername) }, [lockedUsername])
+
+  const activeUsername = lockedUsername || username
+  const canSubmit = activeUsername.trim().length > 0 && apiKey.trim().length > 0
 
   function modelOptionLabel(m: string) {
     const limit = FREE_TIER[m]?.rpd ?? 1500
@@ -132,17 +136,19 @@ function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSu
       </div>
 
       <form className="card form"
-        onSubmit={(e) => { e.preventDefault(); if (canSubmit) onSubmit(username.trim()) }}>
+        onSubmit={(e) => { e.preventDefault(); if (canSubmit) onSubmit(activeUsername.trim()) }}>
         <div className="field">
           <label htmlFor="u">
             <span className="label-num">01</span>
             AniList username
-            <span className="label-hint">public profile</span>
+            <span className="label-hint">{lockedUsername ? '● connected' : 'public profile'}</span>
           </label>
           <div className="input-wrap">
             <span className="input-prefix">anilist.co/user/</span>
             <input id="u" type="text" placeholder="hoshikawa"
-              value={username} onChange={(e) => setUsername(e.target.value)}
+              value={activeUsername}
+              onChange={(e) => { if (!lockedUsername) setUsername(e.target.value) }}
+              disabled={!!lockedUsername}
               autoComplete="off" spellCheck={false} />
           </div>
         </div>
@@ -257,8 +263,11 @@ function LoadingScreen() {
 
 const BACKEND = (import.meta.env.VITE_BACKEND_URL as string | undefined) ?? ''
 
-function useCoverImage(title: string, category: 'series' | 'movies' | 'games'): string | null {
+interface CoverImageResult { url: string | null; mediaId: number | null }
+
+function useCoverImage(title: string, category: 'series' | 'movies' | 'games'): CoverImageResult {
   const [url, setUrl] = useState<string | null>(null)
+  const [mediaId, setMediaId] = useState<number | null>(null)
 
   useEffect(() => {
     if (!title) return
@@ -276,15 +285,16 @@ function useCoverImage(title: string, category: 'series' | 'movies' | 'games'): 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: `query($s:String){Media(search:$s,type:ANIME,isAdult:false){coverImage{large}}}`,
+          query: `query($s:String){Media(search:$s,type:ANIME,isAdult:false){id coverImage{large}}}`,
           variables: { s: title },
         }),
       })
         .then(r => r.json())
         .then(data => {
           if (!cancelled) {
-            const img: string | undefined = data?.data?.Media?.coverImage?.large
-            if (img) setUrl(img)
+            const media = data?.data?.Media
+            if (media?.coverImage?.large) setUrl(media.coverImage.large)
+            if (media?.id) setMediaId(media.id)
           }
         })
         .catch(() => {})
@@ -293,7 +303,7 @@ function useCoverImage(title: string, category: 'series' | 'movies' | 'games'): 
     return () => { cancelled = true }
   }, [title, category])
 
-  return url
+  return { url, mediaId }
 }
 
 // ─── Game card (simple flat info card, no poster) ────────────────────────────
@@ -336,28 +346,88 @@ function GameCard({ item, hue, idx }: { item: Recommendation; hue: number; idx: 
   )
 }
 
+// ─── AniList save helpers ─────────────────────────────────────────────────────
+
+type AniListStatus = 'PLANNING' | 'COMPLETED' | 'DROPPED'
+type SelectionEntry = { mediaId: number; title: string; status: AniListStatus }
+
+const STATUS_LABELS: Record<AniListStatus, string> = {
+  PLANNING:  'Plan to Watch',
+  COMPLETED: 'Completed',
+  DROPPED:   "Won't Watch",
+}
+
+async function batchSaveToAniList(entries: SelectionEntry[], token: string): Promise<void> {
+  const query = entries
+    .map((e, i) => `e${i}: SaveMediaListEntry(mediaId:${e.mediaId},status:${e.status}){id status}`)
+    .join('\n')
+  const res = await fetch('https://graphql.anilist.co', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query: `mutation{${query}}` }),
+  })
+  const data = await res.json() as { errors?: Array<{ message: string }> }
+  if (data.errors?.length) throw new Error(data.errors[0].message)
+  if (!res.ok) throw new Error(`AniList HTTP ${res.status}`)
+}
+
 // ─── Anime card (flip: front = poster, back = details) ────────────────────────
 
-function AnimeCard({ item, hue, idx, category }: {
+const STATUS_OPTIONS: { status: AniListStatus; label: string }[] = [
+  { status: 'PLANNING',  label: 'Plan to Watch' },
+  { status: 'COMPLETED', label: 'Completed'     },
+  { status: 'DROPPED',   label: "Won't Watch"   },
+]
+
+function AnimeCard({ item, hue, idx, category, anilistToken, selectedStatus, onSelect }: {
   item: Recommendation
   hue: number
   idx: number
   category: 'series' | 'movies'
+  anilistToken: string
+  selectedStatus: AniListStatus | null
+  onSelect: (mediaId: number, title: string, status: AniListStatus | null) => void
 }) {
   const [flipped, setFlipped] = useState(false)
-  const coverUrl = useCoverImage(item.title, category)
+  const [actionMode, setActionMode] = useState(false)
+  const { url: coverUrl, mediaId } = useCoverImage(item.title, category)
+
+  function handleClick(e: React.MouseEvent) {
+    if (actionMode) return
+    if (flipped) {
+      if (anilistToken && mediaId) { e.stopPropagation(); setActionMode(true) }
+    } else {
+      setFlipped(true)
+    }
+  }
+
+  function handleMouseLeave() {
+    setActionMode(false)
+    setFlipped(false)
+  }
+
+  function selectStatus(status: AniListStatus, e: React.MouseEvent) {
+    e.stopPropagation()
+    if (!mediaId) return
+    onSelect(mediaId, item.title, selectedStatus === status ? null : status)
+    setActionMode(false)
+  }
 
   return (
     <div
-      className={`card-flip${flipped ? ' is-flipped' : ''}`}
+      className={`card-flip${flipped || actionMode ? ' is-flipped' : ''}`}
       style={{ animationDelay: `${idx * 60}ms` } as React.CSSProperties}
       onMouseEnter={() => setFlipped(true)}
-      onMouseLeave={() => setFlipped(false)}
-      onClick={() => setFlipped(f => !f)}
+      onMouseLeave={handleMouseLeave}
+      onClick={handleClick}
       role="button"
       tabIndex={0}
-      aria-label={`${item.title} — hover or click to see details`}
-      onKeyDown={e => e.key === 'Enter' && setFlipped(f => !f)}
+      aria-label={item.title}
+      onKeyDown={e => { if (e.key === 'Enter') handleClick(e as unknown as React.MouseEvent) }}
     >
       <div className="card-inner">
         <div className="card-front">
@@ -373,31 +443,126 @@ function AnimeCard({ item, hue, idx, category }: {
               </p>
             )}
           </div>
+          {selectedStatus && (
+            <div className="card-front-badge" title={STATUS_LABELS[selectedStatus]}>
+              {selectedStatus === 'COMPLETED' ? '✓' : selectedStatus === 'PLANNING' ? '⋯' : '✕'}
+            </div>
+          )}
         </div>
+
         <div className="card-back">
-          <div className="card-back-match">
-            <span className="match-num">{item.match_score}</span>
-            <span className="match-pct">% match</span>
-          </div>
-          <h3 className="card-back-title">{item.title}</h3>
-          {(item.year || item.studio) && (
-            <div className="result-meta">
-              {item.year && <span>{item.year}</span>}
-              {item.year && item.studio && <span style={{ opacity: 0.5 }}>·</span>}
-              {item.studio && <span>{item.studio}</span>}
+          {actionMode ? (
+            <div className="card-action-panel">
+              <button className="card-action-close"
+                onClick={e => { e.stopPropagation(); setActionMode(false) }}>✕</button>
+              <p className="card-action-title">{item.title}</p>
+              <div className="card-action-btns">
+                {STATUS_OPTIONS.map(({ status, label }) => (
+                  <button
+                    key={status}
+                    className={`card-action-btn${selectedStatus === status ? ' card-action-btn--active' : ''}`}
+                    onClick={e => selectStatus(status, e)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
+          ) : (
+            <>
+              <div className="card-back-match">
+                <span className="match-num">{item.match_score}</span>
+                <span className="match-pct">% match</span>
+              </div>
+              <h3 className="card-back-title">{item.title}</h3>
+              {(item.year || item.studio) && (
+                <div className="result-meta">
+                  {item.year && <span>{item.year}</span>}
+                  {item.year && item.studio && <span style={{ opacity: 0.5 }}>·</span>}
+                  {item.studio && <span>{item.studio}</span>}
+                </div>
+              )}
+              <p className="result-why">{item.reason}</p>
+              {item.genres.length > 0 && (
+                <div className="result-tags">
+                  {item.genres.map(g => <span key={g} className="tag">{g}</span>)}
+                </div>
+              )}
+              <div className="card-back-bottom">
+                {item.similar && (
+                  <div className="result-similar">
+                    <span className="similar-label">because you liked</span>
+                    <span className="similar-name">{item.similar}</span>
+                  </div>
+                )}
+                <p className="card-back-connect-hint">
+                  {!anilistToken
+                    ? 'connect AniList to save'
+                    : !mediaId
+                    ? 'loading…'
+                    : selectedStatus
+                    ? `✓ ${STATUS_LABELS[selectedStatus]} — click to change`
+                    : 'click to add to AniList'}
+                </p>
+              </div>
+            </>
           )}
-          <p className="result-why">{item.reason}</p>
-          {item.genres.length > 0 && (
-            <div className="result-tags">
-              {item.genres.map(g => <span key={g} className="tag">{g}</span>)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Save modal ───────────────────────────────────────────────────────────────
+
+function SaveModal({ selections, token, onClose }: {
+  selections: SelectionEntry[]
+  token: string
+  onClose: () => void
+}) {
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleConfirm() {
+    setSaving(true)
+    setError(null)
+    try {
+      await batchSaveToAniList(selections, token)
+      setSaved(true)
+      setTimeout(onClose, 1600)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed. Try again.')
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Save to AniList</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          {selections.map(s => (
+            <div key={s.title} className="modal-entry">
+              <span className="modal-entry-title">{s.title}</span>
+              <span className={`modal-entry-badge modal-entry-badge--${s.status.toLowerCase()}`}>
+                {STATUS_LABELS[s.status]}
+              </span>
             </div>
-          )}
-          {item.similar && (
-            <div className="result-similar">
-              <span className="similar-label">because you liked</span>
-              <span className="similar-name">{item.similar}</span>
-            </div>
+          ))}
+        </div>
+        {error && <p className="modal-error">{error}</p>}
+        <div className="modal-footer">
+          {saved ? (
+            <p className="modal-saved-msg">✓ All saved to AniList</p>
+          ) : (
+            <button className="cta" style={{ width: '100%' }} onClick={handleConfirm} disabled={saving}>
+              <span>{saving ? 'Saving…' : `Confirm · ${selections.length} entr${selections.length === 1 ? 'y' : 'ies'}`}</span>
+              {!saving && <span className="cta-arrow">→</span>}
+            </button>
           )}
         </div>
       </div>
@@ -413,8 +578,25 @@ const CATS = [
   { key: 'games'  as const, title: 'games',         hue: 160 },
 ]
 
-function ResultsScreen({ result, onReset }: { result: RecommendationResponse; onReset: () => void }) {
+function ResultsScreen({ result, onReset, anilistToken }: {
+  result: RecommendationResponse
+  onReset: () => void
+  anilistToken: string
+}) {
   const { profile } = result
+  const [selections, setSelections] = useState<Record<string, SelectionEntry>>({})
+  const [showModal, setShowModal] = useState(false)
+
+  function handleSelect(mediaId: number, title: string, status: AniListStatus | null) {
+    setSelections(prev => {
+      const next = { ...prev }
+      if (status === null) delete next[title]
+      else next[title] = { mediaId, title, status }
+      return next
+    })
+  }
+
+  const selectionList = Object.values(selections)
 
   return (
     <div className="screen results">
@@ -466,7 +648,12 @@ function ResultsScreen({ result, onReset }: { result: RecommendationResponse; on
               {items.map((item, i) =>
                 cat.key === 'games'
                   ? <GameCard key={item.title} item={item} hue={cat.hue} idx={i} />
-                  : <AnimeCard key={item.title} item={item} hue={cat.hue} idx={i} category={cat.key} />
+                  : <AnimeCard
+                      key={item.title} item={item} hue={cat.hue} idx={i}
+                      category={cat.key} anilistToken={anilistToken}
+                      selectedStatus={selections[item.title]?.status ?? null}
+                      onSelect={handleSelect}
+                    />
               )}
             </div>
           </section>
@@ -480,6 +667,24 @@ function ResultsScreen({ result, onReset }: { result: RecommendationResponse; on
           <button className="link-btn" onClick={onReset}>try a different list</button>.
         </p>
       </footer>
+
+      {anilistToken && selectionList.length > 0 && (
+        <div className="save-bar">
+          <span className="save-bar-count">{selectionList.length} selected</span>
+          <button className="cta save-bar-btn" onClick={() => setShowModal(true)}>
+            <span>Save to AniList</span>
+            <span className="cta-arrow">→</span>
+          </button>
+        </div>
+      )}
+
+      {showModal && (
+        <SaveModal
+          selections={selectionList}
+          token={anilistToken}
+          onClose={() => setShowModal(false)}
+        />
+      )}
     </div>
   )
 }
@@ -488,11 +693,12 @@ function ResultsScreen({ result, onReset }: { result: RecommendationResponse; on
 
 export default function App() {
   const [theme, setTheme] = useLocalStorage<Theme>('animeSenseiTheme', 'dark')
-  const [accent, setAccent] = useState<Accent>('lavender')
   const [stage, setStage] = useState<Stage>('input')
   const [apiKey, setApiKey] = useLocalStorage<string>('animeSenseiGeminiKey', '')
   const [model, setModel] = useLocalStorage<string>('animeSenseiModel', 'gemini-2.5-flash-lite')
   const [rawUsage, setRawUsage] = useLocalStorage<UsageState>('animeSenseiUsage', freshUsage())
+  const [anilistToken, setAnilistToken] = useLocalStorage<string>('animeSenseiAniListToken', '')
+  const [anilistUsername, setAnilistUsername] = useState('')
   const [result, setResult] = useState<RecommendationResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -518,8 +724,30 @@ export default function App() {
   }, [theme])
 
   useEffect(() => {
-    document.documentElement.dataset.accent = accent
-  }, [accent])
+    if (!anilistToken) { setAnilistUsername(''); return }
+    fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${anilistToken}` },
+      body: JSON.stringify({ query: '{ Viewer { name } }' }),
+    })
+      .then(r => r.json())
+      .then(data => { const n = data?.data?.Viewer?.name; if (n) setAnilistUsername(n) })
+      .catch(() => {})
+  }, [anilistToken])
+
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.slice(1))
+    const token = params.get('access_token')
+    if (token) {
+      setAnilistToken(token)
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    }
+  }, [])
+
+  function connectAniList() {
+    window.location.href = '/auth/anilist'
+  }
 
   async function handleSubmit(username: string) {
     setError(null)
@@ -539,40 +767,39 @@ export default function App() {
     }
   }
 
-  const ACCENT_COLORS: Record<Accent, string> = {
-    lavender: 'oklch(0.7 0.13 300)',
-    peach:    'oklch(0.75 0.13 35)',
-    mint:     'oklch(0.72 0.12 165)',
-  }
-
   return (
     <>
       <Backdrop />
       <div className="topbar">
         <div className="logo">
           <div className="logo-mark" />
-          <span className="logo-text">tsukimi</span>
+          <span className="logo-text">sensei</span>
           <span className="logo-sub">· anime suggestions, refined</span>
         </div>
         <div className="topbar-right">
-          <div className="accent-dots" aria-label="Accent colour">
-            {(Object.keys(ACCENT_COLORS) as Accent[]).map(a => (
-              <button
-                key={a}
-                className={`accent-dot ${accent === a ? 'active' : ''}`}
-                style={{ background: ACCENT_COLORS[a] }}
-                onClick={() => setAccent(a)}
-                aria-label={a}
-                title={a}
-              />
-            ))}
-          </div>
           <button
             className="theme-toggle"
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
             aria-label="Toggle theme">
             {theme === 'light' ? '☾' : '☀'}
           </button>
+          {anilistToken ? (
+            <button
+              className="topbar-anilist-btn topbar-anilist-btn--connected"
+              onClick={() => setAnilistToken('')}
+              title="Disconnect AniList"
+            >
+              AL ✓
+            </button>
+          ) : (
+            <button
+              className="topbar-anilist-btn"
+              onClick={connectAniList}
+              title="Connect AniList to save anime"
+            >
+              Connect AL
+            </button>
+          )}
         </div>
       </div>
 
@@ -586,11 +813,12 @@ export default function App() {
             usage={usage}
             onSubmit={handleSubmit}
             error={error}
+            lockedUsername={anilistUsername}
           />
         )}
         {stage === 'loading' && <LoadingScreen />}
         {stage === 'results' && result && (
-          <ResultsScreen result={result} onReset={() => setStage('input')} />
+          <ResultsScreen result={result} onReset={() => setStage('input')} anilistToken={anilistToken} />
         )}
       </main>
     </>

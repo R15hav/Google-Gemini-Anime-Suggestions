@@ -66,6 +66,29 @@ def fetch_candidates(genre: str = None, tag: str = None):
     return data.get("data", {}).get("Page", {}).get("media", [])
 
 
+def derive_search_params(completed_entries: list) -> list[dict]:
+    """Build 3 genre+tag search vectors from the user's watch history — no Gemini call needed."""
+    genre_counter: Counter = Counter()
+    tag_counter: Counter = Counter()
+    for e in completed_entries:
+        media = e.get("media", {})
+        for g in media.get("genres", []):
+            genre_counter[g] += 1
+        for t in media.get("tags", []):
+            tag_counter[t["name"]] += 1
+
+    top_genres = [g for g, _ in genre_counter.most_common(6)]
+    top_tags = [t for t, _ in tag_counter.most_common(6)]
+
+    params = []
+    for i in range(3):
+        params.append({
+            "genre": top_genres[i] if i < len(top_genres) else None,
+            "tag": top_tags[i] if i < len(top_tags) else None,
+        })
+    return params
+
+
 def _compute_profile_stats(completed_entries: list) -> dict:
     if not completed_entries:
         return {"watched": 0, "mean_score": 0.0, "top_genres": [], "recent_fav": ""}
@@ -93,7 +116,7 @@ def _compute_profile_stats(completed_entries: list) -> dict:
     }
 
 
-def fetch_user_watchlist(username: str) -> tuple[list, list, list, dict]:
+def fetch_user_watchlist(username: str) -> tuple[list, list, list, dict, list]:
     """Returns (completed_titles, dropped_titles, planning_titles, profile_stats)."""
     response = requests.post(
         ANILIST_URL,
@@ -127,8 +150,9 @@ def fetch_user_watchlist(username: str) -> tuple[list, list, list, dict]:
     planning = [e["media"]["title"]["romaji"] for e in planning_entries]
 
     profile_stats = _compute_profile_stats(completed_entries)
+    search_params = derive_search_params(completed_entries)
 
-    return completed, dropped, planning, profile_stats
+    return completed, dropped, planning, profile_stats, search_params
 
 
 def validate_user(username: str) -> dict:

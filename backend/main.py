@@ -1,10 +1,14 @@
 import os
 from pathlib import Path
+from urllib.parse import quote
 
+from dotenv import load_dotenv
 import requests as http_requests
+
+load_dotenv()
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -12,10 +16,13 @@ from slowapi.util import get_remote_address
 
 from backend.models import Recommendation, RecommendationResponse, UserProfile
 from backend.services.anilist import fetch_candidates, fetch_user_watchlist, validate_user
-from backend.services.gemini import QuotaExceededError, finalize_recommendations, get_search_params
+from backend.services.gemini import QuotaExceededError, finalize_recommendations
 
 DEFAULT_MODEL = "gemini-2.5-flash-lite"
 RAWG_API_KEY = os.getenv("RAWG_API_KEY", "")
+ANILIST_CLIENT_ID = os.getenv("ANILIST_CLIENT_ID", "")
+ANILIST_CLIENT_SECRET = os.getenv("ANILIST_CLIENT_SECRET", "")
+ANILIST_REDIRECT_URI = os.getenv("ANILIST_REDIRECT_URI", "http://localhost:5173/auth/anilist/callback")
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Anime Sensei API")
@@ -89,26 +96,15 @@ async def get_recs(
             detail="No completed anime found. Mark some anime as completed on AniList first.",
         )
 
-    # 2. Fetch user history and profile stats
+    # 2. Fetch user history, profile stats, and search vectors (no Gemini call needed)
     try:
-        completed, dropped, planning, profile_stats = fetch_user_watchlist(username)
+        completed, dropped, planning, profile_stats, search_queries = fetch_user_watchlist(username)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         raise HTTPException(status_code=502, detail="Failed to reach AniList. Try again in a moment.")
 
-    # 3. Ask Gemini for search vectors based on full profile
-    try:
-        search_queries = get_search_params(completed, dropped, planning, model_choice, x_gemini_api_key)
-    except QuotaExceededError as e:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model.",
-        )
-    except Exception:
-        raise HTTPException(status_code=502, detail="Gemini is unavailable right now. Please try again in a moment.")
-
-    # 4. Gather candidate pool from AniList
+    # 3. Gather candidate pool from AniList using locally-derived search vectors
     try:
         candidate_pool: list = []
         for q in search_queries:
@@ -116,7 +112,7 @@ async def get_recs(
     except Exception:
         raise HTTPException(status_code=502, detail="Failed to reach AniList while fetching candidates. Try again in a moment.")
 
-    # 5. Let Gemini pick the best series, movies, and games
+    # 4. Let Gemini pick the best series, movies, and games
     try:
         result = finalize_recommendations(candidate_pool, completed, dropped, planning, model_choice, x_gemini_api_key)
     except QuotaExceededError as e:
@@ -141,6 +137,42 @@ async def get_recs(
             recent_fav=profile_stats.get("recent_fav", ""),
         ),
     )
+
+
+# ── AniList OAuth ─────────────────────────────────────────────────────────────
+
+@app.get("/auth/anilist")
+async def anilist_auth():
+    url = (
+        "https://anilist.co/api/v2/oauth/authorize"
+        f"?client_id={ANILIST_CLIENT_ID}"
+        f"&redirect_uri={quote(ANILIST_REDIRECT_URI, safe='')}"
+        "&response_type=code"
+    )
+    return RedirectResponse(url)
+
+
+@app.get("/auth/anilist/callback")
+async def anilist_callback(code: str):
+    try:
+        resp = http_requests.post(
+            "https://anilist.co/api/v2/oauth/token",
+            json={
+                "grant_type": "authorization_code",
+                "client_id": ANILIST_CLIENT_ID,
+                "client_secret": ANILIST_CLIENT_SECRET,
+                "redirect_uri": ANILIST_REDIRECT_URI,
+                "code": code,
+            },
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=10,
+        )
+        token = resp.json().get("access_token", "")
+    except Exception:
+        return RedirectResponse("/#anilist_error=token_exchange_failed")
+    if not token:
+        return RedirectResponse("/#anilist_error=no_token")
+    return RedirectResponse(f"/#access_token={token}")
 
 
 # ── Serve React SPA (only when dist/ exists; dev works without a build) ────────
