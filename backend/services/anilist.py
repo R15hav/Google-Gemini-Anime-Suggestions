@@ -8,6 +8,7 @@ query ($genre: String, $tag: String, $page: Int) {
     media (genre: $genre, tag: $tag, sort: SCORE_DESC, type: ANIME, isAdult: false) {
       title { english romaji }
       genres
+      format
       description
       averageScore
     }
@@ -17,7 +18,7 @@ query ($genre: String, $tag: String, $page: Int) {
 
 _WATCHLIST_QUERY = """
 query ($name: String) {
-  MediaListCollection(userName: $name, type: ANIME, status_in: [COMPLETED, DROPPED]) {
+  MediaListCollection(userName: $name, type: ANIME, status_in: [COMPLETED, DROPPED, PLANNING]) {
     lists {
       status
       entries {
@@ -63,8 +64,8 @@ def fetch_candidates(genre: str = None, tag: str = None):
     return data.get("data", {}).get("Page", {}).get("media", [])
 
 
-def fetch_user_watchlist(username: str) -> tuple[list, list]:
-    """Returns (completed_titles, dropped_titles) as lists of romaji strings."""
+def fetch_user_watchlist(username: str) -> tuple[list, list, list]:
+    """Returns (completed_titles, dropped_titles, planning_titles) as lists of romaji strings."""
     response = requests.post(
         ANILIST_URL,
         json={"query": _WATCHLIST_QUERY, "variables": {"name": username}},
@@ -79,15 +80,17 @@ def fetch_user_watchlist(username: str) -> tuple[list, list]:
 
     lists = data.get("data", {}).get("MediaListCollection", {}).get("lists", [])
 
-    completed, dropped = [], []
+    completed, dropped, planning = [], [], []
     for lst in lists:
         entries = [e["media"]["title"]["romaji"] for e in lst.get("entries", [])]
         if lst["status"] == "COMPLETED":
             completed = entries
         elif lst["status"] == "DROPPED":
             dropped = entries
+        elif lst["status"] == "PLANNING":
+            planning = entries
 
-    return completed, dropped
+    return completed, dropped, planning
 
 
 def validate_user(username: str) -> dict:

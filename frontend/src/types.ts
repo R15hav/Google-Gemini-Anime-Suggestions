@@ -4,6 +4,13 @@ export interface Recommendation {
   match_score: number
 }
 
+export interface RecommendationResponse {
+  series: Recommendation[]
+  movies: Recommendation[]
+  notes: string
+  thinking: string
+}
+
 export interface ValidationResult {
   status: 'ok' | 'error' | 'warn'
   message: string

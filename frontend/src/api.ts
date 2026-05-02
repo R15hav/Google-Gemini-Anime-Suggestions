@@ -1,4 +1,4 @@
-import type { Recommendation } from './types'
+import type { RecommendationResponse } from './types'
 
 const BASE = (import.meta.env.VITE_BACKEND_URL as string | undefined) ?? ''
 
@@ -32,10 +32,10 @@ export async function getRecommendations(
   username: string,
   model: string,
   apiKey: string,
-): Promise<Recommendation[]> {
+): Promise<RecommendationResponse> {
   const url = `${BASE}/recommend/${encodeURIComponent(username)}?model_choice=${encodeURIComponent(model)}`
   const res = await fetch(url, {
     headers: { 'x-gemini-api-key': apiKey },
   })
-  return handleResponse<Recommendation[]>(res)
+  return handleResponse<RecommendationResponse>(res)
 }

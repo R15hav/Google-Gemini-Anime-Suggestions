@@ -8,7 +8,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from backend.models import Recommendation
+from backend.models import Recommendation, RecommendationResponse
 from backend.services.anilist import fetch_candidates, fetch_user_watchlist, validate_user
 from backend.services.gemini import QuotaExceededError, finalize_recommendations, get_search_params
 
@@ -46,7 +46,7 @@ async def validate(username: str):
     return {"username": username, "completed_count": result["completed_count"]}
 
 
-@app.get("/recommend/{username}", response_model=list[Recommendation])
+@app.get("/recommend/{username}", response_model=RecommendationResponse)
 @limiter.limit("30/minute")
 async def get_recs(
     request: Request,
@@ -68,17 +68,17 @@ async def get_recs(
             detail="No completed anime found. Mark some anime as completed on AniList first.",
         )
 
-    # 2. Fetch user history
+    # 2. Fetch user history (completed, dropped, planning)
     try:
-        completed, dropped = fetch_user_watchlist(username)
+        completed, dropped, planning = fetch_user_watchlist(username)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         raise HTTPException(status_code=502, detail="Failed to reach AniList. Try again in a moment.")
 
-    # 3. Ask Gemini for search vectors
+    # 3. Ask Gemini for search vectors based on full profile
     try:
-        search_queries = get_search_params(completed, dropped, model_choice, x_gemini_api_key)
+        search_queries = get_search_params(completed, dropped, planning, model_choice, x_gemini_api_key)
     except QuotaExceededError as e:
         raise HTTPException(
             status_code=429,
@@ -90,16 +90,21 @@ async def get_recs(
     for q in search_queries:
         candidate_pool.extend(fetch_candidates(genre=q.get("genre"), tag=q.get("tag")))
 
-    # 5. Let Gemini pick the best 5
+    # 5. Let Gemini pick the best series and movies
     try:
-        final_recs = finalize_recommendations(candidate_pool, completed + dropped, model_choice, x_gemini_api_key)
+        result = finalize_recommendations(candidate_pool, completed, dropped, planning, model_choice, x_gemini_api_key)
     except QuotaExceededError as e:
         raise HTTPException(
             status_code=429,
             detail=f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model.",
         )
 
-    return final_recs
+    return RecommendationResponse(
+        series=[Recommendation(**r) for r in result.get("series", [])],
+        movies=[Recommendation(**r) for r in result.get("movies", [])],
+        notes=result.get("notes", ""),
+        thinking=result.get("thinking", ""),
+    )
 
 
 # ── Serve React SPA (only when dist/ exists; dev works without a build) ────────

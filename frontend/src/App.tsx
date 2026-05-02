@@ -3,12 +3,14 @@ import { getRecommendations } from './api'
 import type { ApiError } from './api'
 import { ErrorBanner } from './components/ErrorBanner'
 import { Hero } from './components/Hero'
+import { NotesCard } from './components/NotesCard'
 import { RecommendationCard } from './components/RecommendationCard'
 import { SettingsModal } from './components/SettingsModal'
 import { StatusChips } from './components/StatusChips'
+import { ThinkingPanel } from './components/ThinkingPanel'
 import { nextFallbackModel } from './constants'
 import { useLocalStorage } from './hooks/useLocalStorage'
-import type { QuotaError, Recommendation, ValidationResult } from './types'
+import type { QuotaError, RecommendationResponse, ValidationResult } from './types'
 
 export default function App() {
   const [apiKey, setApiKey] = useLocalStorage<string>('animeSenseiGeminiKey', '')
@@ -16,7 +18,7 @@ export default function App() {
   const [model, setModel] = useState('gemini-2.5-flash-lite')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null)
-  const [recommendations, setRecommendations] = useState<Recommendation[] | null>(null)
+  const [result, setResult] = useState<RecommendationResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [quotaError, setQuotaError] = useState<QuotaError | null>(null)
   const [bannerError, setBannerError] = useState<{ type: 'quota' | 'auth' | 'error'; message: string } | null>(null)
@@ -25,12 +27,12 @@ export default function App() {
   const canFetch = !!apiKey && profileOk
 
   async function handleGetRecs() {
-    setRecommendations(null)
+    setResult(null)
     setBannerError(null)
     setLoading(true)
     try {
-      const recs = await getRecommendations(username, model, apiKey)
-      setRecommendations(recs)
+      const data = await getRecommendations(username, model, apiKey)
+      setResult(data)
       setQuotaError(null)
     } catch (e: unknown) {
       const err = e as ApiError
@@ -70,9 +72,7 @@ export default function App() {
           width: '100%',
           padding: '0.85rem',
           borderRadius: 'var(--radius-md)',
-          background: canFetch && !loading
-            ? 'var(--accent)'
-            : 'var(--border)',
+          background: canFetch && !loading ? 'var(--accent)' : 'var(--border)',
           color: canFetch && !loading ? '#fff' : 'var(--muted)',
           fontSize: '0.97rem',
           fontWeight: 600,
@@ -125,9 +125,10 @@ export default function App() {
         <ErrorBanner type={bannerError.type} message={bannerError.message} />
       )}
 
-      {recommendations && recommendations.length > 0 && (
-        <section>
-          <div style={{ textAlign: 'center', margin: '2rem 0 1.25rem' }}>
+      {/* Results */}
+      {result && (
+        <section style={{ marginTop: '2rem' }}>
+          <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
             <p style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: 'var(--muted-2)', marginBottom: '4px' }}>
               For {username}
             </p>
@@ -135,9 +136,32 @@ export default function App() {
               Your Picks
             </h2>
           </div>
-          {recommendations.map((rec, i) => (
-            <RecommendationCard key={rec.title} rec={rec} index={i} />
-          ))}
+
+          {/* Profile notes */}
+          {result.notes && <NotesCard notes={result.notes} />}
+
+          {/* Thinking process (collapsible) */}
+          {result.thinking && <ThinkingPanel thinking={result.thinking} />}
+
+          {/* Series section */}
+          {result.series.length > 0 && (
+            <div style={{ marginBottom: '2rem' }}>
+              <SectionHeading icon="📺" label="Anime Series" count={result.series.length} />
+              {result.series.map((rec, i) => (
+                <RecommendationCard key={rec.title} rec={rec} index={i} />
+              ))}
+            </div>
+          )}
+
+          {/* Movies section */}
+          {result.movies.length > 0 && (
+            <div>
+              <SectionHeading icon="🎬" label="Anime Movies" count={result.movies.length} />
+              {result.movies.map((rec, i) => (
+                <RecommendationCard key={rec.title} rec={rec} index={i} />
+              ))}
+            </div>
+          )}
         </section>
       )}
 
@@ -163,6 +187,42 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+    </div>
+  )
+}
+
+function SectionHeading({ icon, label, count }: { icon: string; label: string; count: number }) {
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      marginBottom: '1rem',
+      paddingBottom: '0.6rem',
+      borderBottom: '2px solid var(--accent)',
+    }}>
+      <span style={{ fontSize: '1.1rem' }}>{icon}</span>
+      <h3 style={{
+        fontFamily: 'var(--font-serif)',
+        fontSize: '1.15rem',
+        fontWeight: 700,
+        color: 'var(--ink)',
+        margin: 0,
+      }}>
+        {label}
+      </h3>
+      <span style={{
+        marginLeft: 'auto',
+        fontSize: '0.73rem',
+        fontWeight: 600,
+        color: 'var(--muted-2)',
+        background: 'var(--surface-2)',
+        padding: '2px 10px',
+        borderRadius: '99px',
+        border: '1px solid var(--border)',
+      }}>
+        {count}
+      </span>
     </div>
   )
 }
