@@ -513,6 +513,53 @@ function AnimeCard({ item, hue, idx, category, anilistToken, selectedStatus, onS
   )
 }
 
+// ─── Help / get-started modal ────────────────────────────────────────────────
+
+function HelpModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal help-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 className="modal-title">Get started</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="help-body">
+
+          <div className="help-section">
+            <div className="help-section-eyebrow">step 01</div>
+            <h3 className="help-section-title">Get a free Gemini API key</h3>
+            <ol className="help-steps">
+              <li>Go to <strong>aistudio.google.com</strong></li>
+              <li>Sign in with your Google account</li>
+              <li>Click <strong>Get API key</strong> in the left sidebar</li>
+              <li>Click <strong>Create API key</strong> and select any project</li>
+              <li>Copy the key and paste it into the <em>Gemini API key</em> field on the home screen</li>
+            </ol>
+            <p className="help-note">Free tier: 1,500 requests/day — plenty for personal use.</p>
+          </div>
+
+          <div className="help-divider" />
+
+          <div className="help-section">
+            <div className="help-section-eyebrow">step 02</div>
+            <h3 className="help-section-title">Save suggestions to your AniList</h3>
+            <ol className="help-steps">
+              <li>Click <strong>Connect AL</strong> in the top-right corner</li>
+              <li>Authorise the app on AniList — you'll be redirected back automatically</li>
+              <li>Enter your username and click <em>Read my list</em> to get recommendations</li>
+              <li>Hover a card to flip it, then <strong>click the flipped card</strong> to open the status picker</li>
+              <li>Choose <em>Plan to Watch</em>, <em>Completed</em>, or <em>Won't Watch</em> for each anime</li>
+              <li>A floating <strong>Save to AniList</strong> bar appears once you have selections</li>
+              <li>Click it, review the list, and hit <strong>Confirm</strong> — all saved in one request</li>
+            </ol>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Save modal ───────────────────────────────────────────────────────────────
 
 function SaveModal({ selections, token, onClose }: {
@@ -701,6 +748,8 @@ export default function App() {
   const [anilistUsername, setAnilistUsername] = useState('')
   const [result, setResult] = useState<RecommendationResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [seenHelp, setSeenHelp] = useLocalStorage<boolean>('animeSenseiSeenHelp', false)
+  const [showHelp, setShowHelp] = useState(!seenHelp)
 
   // Auto-reset usage when the UTC date rolls over
   const usage = rawUsage.date === todayUTC() ? rawUsage : freshUsage()
@@ -779,6 +828,13 @@ export default function App() {
         <div className="topbar-right">
           <button
             className="theme-toggle"
+            onClick={() => setShowHelp(true)}
+            aria-label="Get started guide"
+            title="Get started">
+            ?
+          </button>
+          <button
+            className="theme-toggle"
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
             aria-label="Toggle theme">
             {theme === 'light' ? '☾' : '☀'}
@@ -802,6 +858,8 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {showHelp && <HelpModal onClose={() => { setShowHelp(false); setSeenHelp(true) }} />}
 
       <main className="app">
         {stage === 'input' && (

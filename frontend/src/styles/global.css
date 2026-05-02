@@ -1043,3 +1043,77 @@ em { font-style: italic; color: var(--accent-ink); }
   margin: 0;
   letter-spacing: 0.04em;
 }
+
+/* ============ Help modal ============ */
+.help-modal {
+  max-width: 580px;
+}
+.help-body {
+  padding: 0 0 8px;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+.help-section {
+  padding: 22px 28px;
+}
+.help-section-eyebrow {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.help-section-title {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  margin: 0 0 16px;
+}
+.help-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: steps;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.help-steps li {
+  counter-increment: steps;
+  display: flex;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.help-steps li::before {
+  content: counter(steps);
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+.help-steps li strong { color: var(--ink); font-weight: 600; }
+.help-steps li em    { color: var(--accent-ink); font-style: normal; }
+.help-note {
+  margin: 14px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+}
+.help-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 0 28px;
+}
