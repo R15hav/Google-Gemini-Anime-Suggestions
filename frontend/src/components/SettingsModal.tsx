@@ -46,12 +46,17 @@ export function SettingsModal({
         const r = await validateUser(val.trim())
         onValidationResult({ status: 'ok', message: `${r.completed_count} completed anime found.` })
       } catch (e: unknown) {
-        const status = (e as { status?: number }).status
-        if (!status) {
-          onValidationResult({ status: 'warn', message: 'Cannot reach backend.' })
+        const httpStatus = (e as { status?: number }).status
+        const detail = (e as { detail?: string }).detail ?? ''
+        const lower = detail.toLowerCase()
+        if (!httpStatus) {
+          onValidationResult({ status: 'backend', message: 'Cannot reach the backend. Make sure the server is running.' })
+        } else if (lower.includes('anilist') && httpStatus === 502) {
+          onValidationResult({ status: 'anilist', message: detail })
+        } else if (httpStatus === 404 && (!detail || detail === 'Not Found')) {
+          onValidationResult({ status: 'backend', message: 'Backend returned an unexpected response. Try restarting the server.' })
         } else {
-          const detail = (e as { detail?: string }).detail ?? 'Unknown error'
-          onValidationResult({ status: 'error', message: detail })
+          onValidationResult({ status: 'error', message: detail || 'Unknown error.' })
         }
       } finally {
         setValidating(false)
@@ -170,14 +175,7 @@ export function SettingsModal({
             <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: '6px' }}>Checking profile…</p>
           )}
           {!validating && validationResult && (
-            <p style={{
-              fontSize: '0.82rem',
-              marginTop: '6px',
-              color: validationResult.status === 'ok' ? 'var(--success)' : validationResult.status === 'warn' ? 'var(--warning)' : 'var(--error)',
-            }}>
-              {validationResult.status === 'ok' ? '✓ ' : validationResult.status === 'warn' ? '⚠ ' : '✕ '}
-              {validationResult.message}
-            </p>
+            <ValidationChip result={validationResult} />
           )}
         </div>
 
@@ -212,6 +210,29 @@ export function SettingsModal({
         <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '1.25rem 0 0.75rem' }} />
         <p style={{ fontSize: '0.76rem', color: 'var(--muted-2)' }}>ℹ Your AniList list must be <strong>public</strong>.</p>
       </div>
+    </div>
+  )
+}
+
+const CHIP_CONFIG: Record<string, { bg: string; border: string; color: string; icon: string }> = {
+  ok:      { bg: 'var(--success-bg,  #f0fdf4)', border: 'var(--success-border, #bbf7d0)', color: 'var(--success)',  icon: '✓' },
+  warn:    { bg: 'var(--warning-bg)',            border: 'var(--warning-border)',           color: 'var(--warning)', icon: '⚠' },
+  anilist: { bg: 'var(--warning-bg)',            border: 'var(--warning-border)',           color: 'var(--warning)', icon: '📡' },
+  backend: { bg: 'var(--error-bg)',              border: 'var(--error-border)',             color: 'var(--error)',   icon: '🔌' },
+  error:   { bg: 'var(--error-bg)',              border: 'var(--error-border)',             color: 'var(--error)',   icon: '✕' },
+}
+
+function ValidationChip({ result }: { result: { status: string; message: string } }) {
+  const { bg, border, color, icon } = CHIP_CONFIG[result.status] ?? CHIP_CONFIG.error
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: '8px',
+      background: bg, border: `1px solid ${border}`,
+      borderRadius: 'var(--radius-sm)',
+      padding: '0.5rem 0.75rem', marginTop: '8px',
+    }}>
+      <span style={{ fontSize: '0.85rem', color, flexShrink: 0, lineHeight: 1.5 }}>{icon}</span>
+      <span style={{ fontSize: '0.82rem', color, lineHeight: 1.5 }}>{result.message}</span>
     </div>
   )
 }

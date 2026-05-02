@@ -54,7 +54,6 @@ def safe_json_parse(text: str) -> dict | list:
     text = re.sub(r"^```\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 
-    # Try object first, then array
     for pattern in (r"\{.*\}", r"\[.*\]"):
         match = re.search(pattern, text, re.DOTALL)
         if match:
@@ -96,8 +95,6 @@ def finalize_recommendations(
     model: str,
     api_key: str,
 ) -> dict:
-    all_seen = user_completed + user_dropped
-
     slim = [
         {
             "title": c.get("title", {}).get("romaji") or c.get("title", {}).get("english", "Unknown"),
@@ -110,35 +107,45 @@ def finalize_recommendations(
     ]
 
     prompt = f"""
-You are an expert anime recommendation engine. Analyse the user's profile and recommend anime from the candidate pool.
+You are an expert anime and video game recommendation engine.
 
 USER PROFILE:
-- Completed ({len(user_completed)} titles): {user_completed}
-- Dropped ({len(user_dropped)} titles — avoid similar ones): {user_dropped}
-- Plan to watch ({len(user_planning)} titles — consider these interests): {user_planning}
+- Completed ({len(user_completed)} titles): {json.dumps(user_completed[:50], ensure_ascii=False)}
+- Dropped ({len(user_dropped)} titles — avoid similar ones): {json.dumps(user_dropped[:20], ensure_ascii=False)}
+- Plan to watch ({len(user_planning)} titles): {json.dumps(user_planning[:30], ensure_ascii=False)}
 
-CANDIDATE POOL ({len(slim)} titles):
+CANDIDATE POOL ({len(slim)} titles — pick series and movies only from here):
 {json.dumps(slim, ensure_ascii=False)}
 
 INSTRUCTIONS:
-1. Study the user's taste from completed, dropped, and planning lists.
-2. Never recommend anything in the user's completed or dropped list.
-3. Select exactly 5 SERIES (format: TV, TV_SHORT, ONA, OVA, or SPECIAL) and up to 5 MOVIES (format: MOVIE). If fewer than 5 movies exist in the pool, return as many as available.
-4. Prefer variety across genres and avoid picking similar titles.
-5. For each pick, explain WHY it suits this specific user (1-2 sentences referencing their actual watching history).
-6. Assign a match_score (0-100) based on fit with user taste.
+1. Never recommend anything in the completed or dropped lists.
+2. Select exactly 5 SERIES (format TV, TV_SHORT, ONA, OVA, or SPECIAL) from the candidate pool.
+3. Select up to 5 MOVIES (format MOVIE) from the candidate pool. If fewer than 5 movies exist, return as many as available.
+4. Generate exactly 5 VIDEO GAME recommendations based on the user's anime taste — these do NOT come from the candidate pool; use your knowledge of real games.
+5. For every pick include all these fields:
+   - "title": the title
+   - "reason": 1-2 sentences explaining why it suits this specific user, referencing their actual watch history
+   - "match_score": integer 0-100 reflecting fit with user taste
+   - "similar": ONE title from the user's completed list this resembles most closely
+   - "year": release year as an integer (e.g. 2022)
+   - "studio": studio name (anime) or developer name (games)
+   - "genres": array of 2-3 genre strings
 
-Return a single JSON object in this exact format (no markdown, no explanation outside the JSON):
+Return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON:
 {{
-  "thinking": "Your step-by-step reasoning: what you observed in the user's completed list, what their dropped titles reveal, what their planning list signals, and how you chose each recommendation.",
-  "notes": "A concise summary (3-5 sentences) of the key patterns noticed in the user's profile — genres they love, themes they avoid, and what their plan-to-watch list reveals about their interests.",
+  "thinking": "your step-by-step reasoning about the user's taste and each pick",
+  "notes": "3-5 sentence profile summary: key genres they love, themes they tend to drop, and what their plan-to-watch list signals",
   "series": [
-    {{"title": "...", "reason": "...", "match_score": 85}},
-    ...5 items...
+    {{"title": "...", "reason": "...", "match_score": 85, "similar": "...", "year": 2019, "studio": "...", "genres": ["...", "..."]}},
+    ...exactly 5 items
   ],
   "movies": [
-    {{"title": "...", "reason": "...", "match_score": 90}},
-    ...up to 5 items...
+    {{"title": "...", "reason": "...", "match_score": 90, "similar": "...", "year": 2021, "studio": "...", "genres": ["...", "..."]}},
+    ...up to 5 items
+  ],
+  "games": [
+    {{"title": "...", "reason": "...", "match_score": 88, "similar": "...", "year": 2022, "studio": "...", "genres": ["...", "..."]}},
+    ...exactly 5 items
   ]
 }}
 """

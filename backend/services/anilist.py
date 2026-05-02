@@ -1,3 +1,5 @@
+from collections import Counter
+
 import requests
 
 ANILIST_URL = "https://graphql.anilist.co"
@@ -64,8 +66,35 @@ def fetch_candidates(genre: str = None, tag: str = None):
     return data.get("data", {}).get("Page", {}).get("media", [])
 
 
-def fetch_user_watchlist(username: str) -> tuple[list, list, list]:
-    """Returns (completed_titles, dropped_titles, planning_titles) as lists of romaji strings."""
+def _compute_profile_stats(completed_entries: list) -> dict:
+    if not completed_entries:
+        return {"watched": 0, "mean_score": 0.0, "top_genres": [], "recent_fav": ""}
+
+    scores = [e["score"] for e in completed_entries if e.get("score") and e["score"] > 0]
+    mean_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+
+    genre_counter: Counter = Counter()
+    for e in completed_entries:
+        for g in e["media"].get("genres", []):
+            genre_counter[g] += 1
+    top_genres = [g for g, _ in genre_counter.most_common(3)]
+
+    best = max(completed_entries, key=lambda e: e.get("score") or 0, default=None)
+    recent_fav = ""
+    if best:
+        title = best["media"]["title"]
+        recent_fav = title.get("english") or title.get("romaji") or ""
+
+    return {
+        "watched": len(completed_entries),
+        "mean_score": mean_score,
+        "top_genres": top_genres,
+        "recent_fav": recent_fav,
+    }
+
+
+def fetch_user_watchlist(username: str) -> tuple[list, list, list, dict]:
+    """Returns (completed_titles, dropped_titles, planning_titles, profile_stats)."""
     response = requests.post(
         ANILIST_URL,
         json={"query": _WATCHLIST_QUERY, "variables": {"name": username}},
@@ -80,17 +109,26 @@ def fetch_user_watchlist(username: str) -> tuple[list, list, list]:
 
     lists = data.get("data", {}).get("MediaListCollection", {}).get("lists", [])
 
-    completed, dropped, planning = [], [], []
-    for lst in lists:
-        entries = [e["media"]["title"]["romaji"] for e in lst.get("entries", [])]
-        if lst["status"] == "COMPLETED":
-            completed = entries
-        elif lst["status"] == "DROPPED":
-            dropped = entries
-        elif lst["status"] == "PLANNING":
-            planning = entries
+    completed_entries: list = []
+    dropped_entries: list = []
+    planning_entries: list = []
 
-    return completed, dropped, planning
+    for lst in lists:
+        entries = lst.get("entries", [])
+        if lst["status"] == "COMPLETED":
+            completed_entries = entries
+        elif lst["status"] == "DROPPED":
+            dropped_entries = entries
+        elif lst["status"] == "PLANNING":
+            planning_entries = entries
+
+    completed = [e["media"]["title"]["romaji"] for e in completed_entries]
+    dropped = [e["media"]["title"]["romaji"] for e in dropped_entries]
+    planning = [e["media"]["title"]["romaji"] for e in planning_entries]
+
+    profile_stats = _compute_profile_stats(completed_entries)
+
+    return completed, dropped, planning, profile_stats
 
 
 def validate_user(username: str) -> dict:
@@ -103,11 +141,11 @@ def validate_user(username: str) -> dict:
         json={"query": _VALIDATE_QUERY, "variables": {"name": username}},
         timeout=10,
     )
-    # AniList may return 4xx with a JSON error body — always parse JSON first
     try:
         data = response.json()
     except Exception:
         return {"exists": False, "completed_count": 0, "error": "AniList is unreachable. Try again in a moment."}
+
     errors = data.get("errors")
     if errors:
         msg = errors[0].get("message", "").lower()
@@ -119,7 +157,6 @@ def validate_user(username: str) -> dict:
 
     lists = (data.get("data") or {}).get("MediaListCollection", {}).get("lists", [])
 
-    # AniList returns null data (not an error) for non-existent users
     if data.get("data") is None:
         return {"exists": False, "completed_count": 0, "error": "AniList user not found."}
 

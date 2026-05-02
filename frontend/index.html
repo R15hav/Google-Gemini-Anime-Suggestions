@@ -4,11 +4,21 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/torii.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Anime Sensei</title>
+    <title>Tsukimi · Anime Suggestions</title>
+    <!-- Set theme before any CSS or React loads to prevent white flash -->
+    <script>
+      (function () {
+        var BG = { dark: 'oklch(0.18 0.025 280)', light: 'oklch(0.985 0.008 70)' };
+        var theme = 'dark';
+        try { var s = localStorage.getItem('animeSenseiTheme'); if (s) theme = JSON.parse(s); } catch (_) {}
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.background = BG[theme] || BG.dark;
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@700;800&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
   </head>
