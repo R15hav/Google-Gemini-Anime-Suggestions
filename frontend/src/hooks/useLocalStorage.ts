@@ -1,5 +1,7 @@
 import { useState } from 'react'
 
+type Updater<T> = T | ((prev: T) => T)
+
 export function useLocalStorage<T>(key: string, initialValue: T) {
   const [stored, setStored] = useState<T>(() => {
     try {
@@ -10,14 +12,19 @@ export function useLocalStorage<T>(key: string, initialValue: T) {
     }
   })
 
-  const setValue = (value: T) => {
+  const setValue = (value: Updater<T>) => {
     try {
-      setStored(value)
-      if (value === '' || value === null || value === undefined) {
-        window.localStorage.removeItem(key)
-      } else {
-        window.localStorage.setItem(key, JSON.stringify(value))
-      }
+      setStored(prev => {
+        const next = typeof value === 'function'
+          ? (value as (p: T) => T)(prev)
+          : value
+        if (next === '' || next === null || next === undefined) {
+          window.localStorage.removeItem(key)
+        } else {
+          window.localStorage.setItem(key, JSON.stringify(next))
+        }
+        return next
+      })
     } catch { /* ignore */ }
   }
 
