@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Iterator
 from google import genai
 from google.genai.errors import ClientError
 
@@ -48,6 +49,21 @@ def call_gemini(prompt: str, model: str = "gemini-2.5-flash-lite", api_key: str 
         raise
 
 
+def call_gemini_stream(prompt: str, model: str, api_key: str) -> Iterator[str]:
+    if not api_key:
+        raise ValueError("A Gemini API key must be provided.")
+    client = genai.Client(api_key=api_key)
+    try:
+        for chunk in client.models.generate_content_stream(model=model, contents=prompt):
+            text = getattr(chunk, "text", None)
+            if text:
+                yield text
+    except ClientError as e:
+        if e.status_code == 429:
+            raise QuotaExceededError(model)
+        raise
+
+
 def safe_json_parse(text: str) -> dict | list:
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text)
@@ -87,14 +103,12 @@ Example: [{{"genre": "Action", "tag": "Cyberpunk"}}, ...]
     return safe_json_parse(response)
 
 
-def finalize_recommendations(
+def _build_recommendation_prompt(
     candidates: list,
     user_completed: list,
     user_dropped: list,
     user_planning: list,
-    model: str,
-    api_key: str,
-) -> dict:
+) -> str:
     slim = [
         {
             "title": c.get("title", {}).get("romaji") or c.get("title", {}).get("english", "Unknown"),
@@ -106,7 +120,7 @@ def finalize_recommendations(
         for c in candidates[:60]
     ]
 
-    prompt = f"""
+    return f"""
 You are an expert anime and video game recommendation engine.
 
 USER PROFILE:
@@ -149,5 +163,34 @@ Return ONLY a valid JSON object — no markdown fences, no explanation outside t
   ]
 }}
 """
+
+
+def finalize_recommendations(
+    candidates: list,
+    user_completed: list,
+    user_dropped: list,
+    user_planning: list,
+    model: str,
+    api_key: str,
+) -> dict:
+    prompt = _build_recommendation_prompt(candidates, user_completed, user_dropped, user_planning)
     response = call_gemini(prompt, model, api_key)
     return safe_json_parse(response)
+
+
+def finalize_recommendations_stream(
+    candidates: list,
+    user_completed: list,
+    user_dropped: list,
+    user_planning: list,
+    model: str,
+    api_key: str,
+) -> Iterator:
+    """Yield text chunks from Gemini as they arrive. The final yielded value is
+    a dict of shape {"__result__": <parsed JSON>} containing the parsed output."""
+    prompt = _build_recommendation_prompt(candidates, user_completed, user_dropped, user_planning)
+    buffer_parts: list[str] = []
+    for chunk in call_gemini_stream(prompt, model, api_key):
+        buffer_parts.append(chunk)
+        yield chunk
+    yield {"__result__": safe_json_parse("".join(buffer_parts))}

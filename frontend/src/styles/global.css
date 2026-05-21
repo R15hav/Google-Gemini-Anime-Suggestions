@@ -458,6 +458,44 @@ em { font-style: italic; color: var(--accent-ink); }
   animation: blink 0.9s step-end infinite;
 }
 
+.loading-stream {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 12px);
+  background: var(--surface, rgba(255, 255, 255, 0.03));
+  overflow: hidden;
+}
+.loading-stream-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--line);
+}
+.loading-stream-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+.loading-stream-body {
+  padding: 14px 16px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ============ Results ============ */
 .results-header {
   display: flex;

@@ -6,9 +6,11 @@ from dotenv import load_dotenv
 import requests as http_requests
 
 load_dotenv()
+import json as _json
+
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -16,7 +18,11 @@ from slowapi.util import get_remote_address
 
 from backend.models import Recommendation, RecommendationResponse, UserProfile
 from backend.services.anilist import fetch_candidates, fetch_user_watchlist, validate_user
-from backend.services.gemini import QuotaExceededError, finalize_recommendations
+from backend.services.gemini import (
+    QuotaExceededError,
+    finalize_recommendations,
+    finalize_recommendations_stream,
+)
 
 DEFAULT_MODEL = "gemini-2.5-flash-lite"
 RAWG_API_KEY = os.getenv("RAWG_API_KEY", "")
@@ -136,6 +142,112 @@ async def get_recs(
             top_genres=profile_stats.get("top_genres", []),
             recent_fav=profile_stats.get("recent_fav", ""),
         ),
+    )
+
+
+# ── Streaming recommendation endpoint ─────────────────────────────────────────
+
+@app.get("/recommend-stream/{username}")
+@limiter.limit("30/minute")
+async def get_recs_stream(
+    request: Request,
+    username: str,
+    model_choice: str = DEFAULT_MODEL,
+    x_gemini_api_key: str = Header(None),
+):
+    """NDJSON stream. Each line is a JSON event:
+      {"type":"status","text":"..."}        — hardcoded setup phases
+      {"type":"chunk","text":"..."}         — live Gemini stream
+      {"type":"done","result":{...}}        — final parsed response
+      {"type":"error","detail":"...","status":int}
+    """
+
+    def event(obj) -> bytes:
+        return (_json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def generate():
+        if not x_gemini_api_key:
+            yield event({"type": "error", "status": 401,
+                         "detail": "A Gemini API key is required. Get your free key at aistudio.google.com."})
+            return
+
+        yield event({"type": "status", "text": "validating anilist profile…"})
+        validation = validate_user(username)
+        if validation["error"]:
+            code = 404 if not validation["exists"] else 403
+            yield event({"type": "error", "status": code, "detail": validation["error"]})
+            return
+        if validation["completed_count"] == 0:
+            yield event({"type": "error", "status": 400,
+                         "detail": "No completed anime found. Mark some anime as completed on AniList first."})
+            return
+
+        yield event({"type": "status", "text": "loading your watch history…"})
+        try:
+            completed, dropped, planning, profile_stats, search_queries = fetch_user_watchlist(username)
+        except ValueError as e:
+            yield event({"type": "error", "status": 502, "detail": str(e)})
+            return
+        except Exception:
+            yield event({"type": "error", "status": 502,
+                         "detail": "Failed to reach AniList. Try again in a moment."})
+            return
+
+        yield event({"type": "status", "text": "weighing your genre preferences…"})
+        try:
+            candidate_pool: list = []
+            for q in search_queries:
+                candidate_pool.extend(fetch_candidates(genre=q.get("genre"), tag=q.get("tag")))
+        except Exception:
+            yield event({"type": "error", "status": 502,
+                         "detail": "Failed to reach AniList while fetching candidates. Try again in a moment."})
+            return
+
+        yield event({"type": "status", "text": "consulting gemini…"})
+
+        final_payload = None
+        try:
+            for piece in finalize_recommendations_stream(
+                candidate_pool, completed, dropped, planning, model_choice, x_gemini_api_key
+            ):
+                if isinstance(piece, dict) and "__result__" in piece:
+                    final_payload = piece["__result__"]
+                else:
+                    yield event({"type": "chunk", "text": piece})
+        except QuotaExceededError as e:
+            yield event({"type": "error", "status": 429,
+                         "detail": f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model."})
+            return
+        except Exception:
+            yield event({"type": "error", "status": 502,
+                         "detail": "Gemini is unavailable right now. Please try again in a moment."})
+            return
+
+        if final_payload is None:
+            yield event({"type": "error", "status": 502,
+                         "detail": "Gemini returned no parseable output."})
+            return
+
+        response = RecommendationResponse(
+            series=[Recommendation.model_validate(r) for r in final_payload.get("series", [])],
+            movies=[Recommendation.model_validate(r) for r in final_payload.get("movies", [])],
+            games=[Recommendation.model_validate(r) for r in final_payload.get("games", [])],
+            notes=final_payload.get("notes", ""),
+            thinking=final_payload.get("thinking", ""),
+            profile=UserProfile(
+                username=username,
+                watched=profile_stats.get("watched", 0),
+                mean_score=profile_stats.get("mean_score", 0.0),
+                top_genres=profile_stats.get("top_genres", []),
+                recent_fav=profile_stats.get("recent_fav", ""),
+            ),
+        )
+        yield event({"type": "done", "result": response.model_dump()})
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

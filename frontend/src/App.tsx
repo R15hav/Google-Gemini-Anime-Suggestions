@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { getRecommendations } from './api'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { getRecommendationsStream } from './api'
 import type { ApiError } from './api'
 import { FREE_TIER, MODELS } from './constants'
 import { useLocalStorage } from './hooks/useLocalStorage'
@@ -205,32 +205,18 @@ function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSu
 
 // ─── Loading screen ───────────────────────────────────────────────────────────
 
-const LOADING_LINES = [
-  'connecting to anilist…',
-  'loading your watch history…',
-  'reading your ratings and taste profile…',
-  'weighing your genre preferences…',
-  'consulting gemini for recommendations…',
-  'curating five series, five films, five games…',
-  'adding the finishing touches…',
-]
-
-function LoadingScreen() {
-  const [lineIdx, setLineIdx] = useState(0)
-  const [typed, setTyped] = useState('')
+function LoadingScreen({ statusLog, streamText }: {
+  statusLog: string[]
+  streamText: string
+}) {
+  const streamRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    const line = LOADING_LINES[lineIdx]
-    if (typed.length < line.length) {
-      const t = setTimeout(() => setTyped(line.slice(0, typed.length + 1)), 22)
-      return () => clearTimeout(t)
-    }
-    const next = setTimeout(() => {
-      setLineIdx(i => (i + 1) % LOADING_LINES.length)
-      setTyped('')
-    }, 800)
-    return () => clearTimeout(next)
-  }, [typed, lineIdx])
+    if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight
+  }, [streamText])
+
+  const done = statusLog.slice(0, -1)
+  const active = statusLog[statusLog.length - 1]
 
   return (
     <div className="screen loading">
@@ -242,16 +228,31 @@ function LoadingScreen() {
           <div className="orbit-ring r3" />
         </div>
         <div className="loading-log">
-          {LOADING_LINES.slice(0, lineIdx).map((l, i) => (
+          {done.map((l, i) => (
             <div key={i} className="log-line done">
               <span className="log-mark">✓</span>{l}
             </div>
           ))}
-          <div className="log-line active">
-            <span className="log-mark spinning">◐</span>
-            {typed}<span className="caret">▍</span>
-          </div>
+          {active && (
+            <div className="log-line active">
+              <span className="log-mark spinning">◐</span>
+              {active}<span className="caret">▍</span>
+            </div>
+          )}
         </div>
+
+        {streamText && (
+          <div className="loading-stream">
+            <div className="loading-stream-head">
+              <span className="loading-stream-dot" />
+              gemini is thinking
+            </div>
+            <div className="loading-stream-body" ref={streamRef}>
+              {streamText}
+              <span className="caret">▍</span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -750,6 +751,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [seenHelp, setSeenHelp] = useLocalStorage<boolean>('animeSenseiSeenHelp', false)
   const [showHelp, setShowHelp] = useState(!seenHelp)
+  const [statusLog, setStatusLog] = useState<string[]>([])
+  const [streamText, setStreamText] = useState('')
 
   // Auto-reset usage when the UTC date rolls over
   const usage = rawUsage.date === todayUTC() ? rawUsage : freshUsage()
@@ -800,9 +803,14 @@ export default function App() {
 
   async function handleSubmit(username: string) {
     setError(null)
+    setStreamText('')
+    setStatusLog(['connecting to anilist…'])
     setStage('loading')
     try {
-      const data = await getRecommendations(username, model, apiKey)
+      const data = await getRecommendationsStream(username, model, apiKey, {
+        onStatus: text => setStatusLog(log => [...log, text]),
+        onChunk:  text => setStreamText(prev => prev + text),
+      })
       recordUsage(model, false)
       setResult(data)
       setStage('results')
@@ -874,7 +882,7 @@ export default function App() {
             lockedUsername={anilistUsername}
           />
         )}
-        {stage === 'loading' && <LoadingScreen />}
+        {stage === 'loading' && <LoadingScreen statusLog={statusLog} streamText={streamText} />}
         {stage === 'results' && result && (
           <ResultsScreen result={result} onReset={() => setStage('input')} anilistToken={anilistToken} />
         )}
