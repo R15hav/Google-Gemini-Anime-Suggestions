@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getRecommendationsStream } from './api'
 import type { ApiError } from './api'
-import { FREE_TIER, MODELS } from './constants'
+import { FREE_TIER, fmtDuration, MODELS, secondsUntilMidnightUTC } from './constants'
 import { useLocalStorage } from './hooks/useLocalStorage'
 import type { Recommendation, RecommendationResponse } from './types'
 
@@ -18,14 +18,45 @@ const MODEL_LABELS: Record<string, string> = {
   'gemini-2.0-flash-lite': 'Gemini 2.0 Flash Lite',
 }
 
+interface ExceededState {
+  retryAt: number      // ms epoch — when Google said this model becomes available again
+  metric: string       // quotaMetric from QuotaFailure, e.g. "generate_content_free_tier_requests"
+}
+
 interface UsageState {
-  date: string                         // YYYY-MM-DD UTC
-  counts: Record<string, number>       // model → requests used today
-  exceeded: Record<string, boolean>    // model → quota exceeded flag
+  date: string                                // YYYY-MM-DD UTC
+  counts: Record<string, number>              // model → requests billed today (incremented when backend dispatches a Gemini call)
+  exceeded: Record<string, ExceededState>     // model → 429 cooldown info
 }
 
 function todayUTC() { return new Date().toISOString().slice(0, 10) }
 function freshUsage(): UsageState { return { date: todayUTC(), counts: {}, exceeded: {} } }
+
+// Migrate the pre-2026 shape where `exceeded[m]` was a boolean. Boolean true
+// becomes a cooldown until the next midnight UTC; false drops the entry.
+function migrateUsage(raw: unknown): UsageState {
+  if (!raw || typeof raw !== 'object') return freshUsage()
+  const r = raw as { date?: unknown; counts?: unknown; exceeded?: unknown }
+  const date = typeof r.date === 'string' ? r.date : todayUTC()
+  const counts = (r.counts && typeof r.counts === 'object')
+    ? r.counts as Record<string, number>
+    : {}
+  const rawEx = (r.exceeded && typeof r.exceeded === 'object')
+    ? r.exceeded as Record<string, unknown>
+    : {}
+  const exceeded: Record<string, ExceededState> = {}
+  for (const [m, v] of Object.entries(rawEx)) {
+    if (v === true) {
+      exceeded[m] = { retryAt: Date.now() + secondsUntilMidnightUTC() * 1000, metric: 'unknown' }
+    } else if (v && typeof v === 'object') {
+      const s = v as Partial<ExceededState>
+      if (typeof s.retryAt === 'number') {
+        exceeded[m] = { retryAt: s.retryAt, metric: typeof s.metric === 'string' ? s.metric : 'unknown' }
+      }
+    }
+  }
+  return { date, counts, exceeded }
+}
 
 // ─── Backdrop orbs ────────────────────────────────────────────────────────────
 
@@ -98,12 +129,22 @@ function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSu
   useEffect(() => { if (lockedUsername) setUsername(lockedUsername) }, [lockedUsername])
 
   const activeUsername = lockedUsername || username
-  const canSubmit = activeUsername.trim().length > 0 && apiKey.trim().length > 0
+  const cooldownActive = usage.exceeded[model] && usage.exceeded[model].retryAt > Date.now()
+  const canSubmit = activeUsername.trim().length > 0 && apiKey.trim().length > 0 && !cooldownActive
+
+  function cooldownLabel(m: string): string | null {
+    const s = usage.exceeded[m]
+    if (!s) return null
+    const remaining = Math.max(0, Math.ceil((s.retryAt - Date.now()) / 1000))
+    if (remaining <= 0) return null
+    return `available in ${fmtDuration(remaining)}`
+  }
 
   function modelOptionLabel(m: string) {
     const limit = FREE_TIER[m]?.rpd ?? 1500
     const used  = usage.counts[m] ?? 0
-    if (usage.exceeded[m]) return `${MODEL_LABELS[m]}  —  quota exceeded today`
+    const cd = cooldownLabel(m)
+    if (cd) return `${MODEL_LABELS[m]}  —  ${cd}`
     if (used > 0) return `${MODEL_LABELS[m]}  ·  ${(limit - used).toLocaleString()} of ${limit.toLocaleString()} left`
     return `${MODEL_LABELS[m]}  ·  ${limit.toLocaleString()}/day free`
   }
@@ -111,7 +152,12 @@ function InputScreen({ apiKey, onApiKeyChange, model, onModelChange, usage, onSu
   function usageHint() {
     const limit = FREE_TIER[model]?.rpd ?? 1500
     const used  = usage.counts[model] ?? 0
-    if (usage.exceeded[model]) return { text: 'quota exceeded for today — resets at midnight UTC', warn: true }
+    const cd = cooldownLabel(model)
+    if (cd) {
+      const metric = usage.exceeded[model]?.metric
+      const metricNote = metric && metric !== 'unknown' ? ` (${metric})` : ''
+      return { text: `quota exceeded${metricNote} — ${cd}`, warn: true }
+    }
     if (used > 0) return { text: `${used} request${used > 1 ? 's' : ''} used today · ${(limit - used).toLocaleString()} of ${limit.toLocaleString()} remaining`, warn: false }
     return { text: `${limit.toLocaleString()} requests/day on the free tier`, warn: false }
   }
@@ -745,6 +791,7 @@ export default function App() {
   const [apiKey, setApiKey] = useLocalStorage<string>('animeSenseiGeminiKey', '')
   const [model, setModel] = useLocalStorage<string>('animeSenseiModel', 'gemini-2.5-flash-lite')
   const [rawUsage, setRawUsage] = useLocalStorage<UsageState>('animeSenseiUsage', freshUsage())
+  const [, forceTick] = useState(0)
   const [anilistToken, setAnilistToken] = useLocalStorage<string>('animeSenseiAniListToken', '')
   const [anilistUsername, setAnilistUsername] = useState('')
   const [result, setResult] = useState<RecommendationResponse | null>(null)
@@ -754,17 +801,59 @@ export default function App() {
   const [statusLog, setStatusLog] = useState<string[]>([])
   const [streamText, setStreamText] = useState('')
 
-  // Auto-reset usage when the UTC date rolls over
-  const usage = rawUsage.date === todayUTC() ? rawUsage : freshUsage()
+  // Migrate any legacy shape on read, then auto-reset counts at the UTC rollover.
+  // `exceeded` cooldowns survive midnight — Google's daily limits use Pacific
+  // time, not UTC, so the countdown timestamp is the authoritative source.
+  const usage: UsageState = useMemo(() => {
+    const m = migrateUsage(rawUsage)
+    if (m.date === todayUTC()) return m
+    return { date: todayUTC(), counts: {}, exceeded: m.exceeded }
+  }, [rawUsage])
 
-  function recordUsage(m: string, quotaExceeded: boolean) {
-    const next: UsageState = {
-      date: todayUTC(),
-      counts:   { ...usage.counts,   [m]: (usage.counts[m]   ?? 0) + 1 },
-      exceeded: { ...usage.exceeded, ...(quotaExceeded ? { [m]: true } : {}) },
-    }
-    setRawUsage(next)
+  function recordBilled(m: string) {
+    setRawUsage(prev => {
+      const base = migrateUsage(prev)
+      const date = todayUTC()
+      const counts = base.date === date ? base.counts : {}
+      return {
+        date,
+        counts: { ...counts, [m]: (counts[m] ?? 0) + 1 },
+        exceeded: base.exceeded,
+      }
+    })
   }
+
+  function recordExceeded(m: string, retryAfterSeconds: number, metric: string) {
+    const retryAt = Date.now() + Math.max(0, retryAfterSeconds) * 1000
+    setRawUsage(prev => {
+      const base = migrateUsage(prev)
+      return {
+        ...base,
+        date: todayUTC(),
+        exceeded: { ...base.exceeded, [m]: { retryAt, metric } },
+      }
+    })
+  }
+
+  // Auto-clear expired cooldowns and drive the 1Hz countdown re-render on InputScreen.
+  useEffect(() => {
+    if (stage !== 'input') return
+    const id = setInterval(() => {
+      const now = Date.now()
+      const expired = Object.entries(usage.exceeded).filter(([, s]) => s.retryAt <= now)
+      if (expired.length) {
+        setRawUsage(prev => {
+          const base = migrateUsage(prev)
+          const next = { ...base.exceeded }
+          for (const [m] of expired) delete next[m]
+          return { ...base, exceeded: next }
+        })
+      } else {
+        forceTick(t => t + 1)
+      }
+    }, 1000)
+    return () => clearInterval(id)
+  }, [stage, usage.exceeded])
 
   useEffect(() => {
     const BG: Record<string, string> = {
@@ -810,15 +899,20 @@ export default function App() {
       const data = await getRecommendationsStream(username, model, apiKey, {
         onStatus: text => setStatusLog(log => [...log, text]),
         onChunk:  text => setStreamText(prev => prev + text),
+        onBilled: m    => recordBilled(m),
       })
-      recordUsage(model, false)
       setResult(data)
       setStage('results')
     } catch (e: unknown) {
       const err = e as ApiError
-      const isQuota   = err.status === 429
-      const isGemini  = err.status === 502 || (err.detail ?? '').toLowerCase().includes('gemini')
-      if (isQuota || isGemini) recordUsage(model, isQuota)
+      if (err.status === 429) {
+        const m = err.billedModel ?? err.modelFromApi ?? model
+        recordExceeded(
+          m,
+          err.retryAfterSeconds ?? secondsUntilMidnightUTC(),
+          err.quotaMetric ?? 'unknown',
+        )
+      }
       setError(err.detail ?? 'Something went wrong. Please try again.')
       setStage('input')
     }

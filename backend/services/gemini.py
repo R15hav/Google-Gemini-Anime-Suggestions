@@ -1,5 +1,7 @@
 import json
+import random
 import re
+import time
 from typing import Iterator
 from google import genai
 from google.genai.errors import ClientError
@@ -22,9 +24,109 @@ MODEL_FALLBACK_ORDER = [
 
 
 class QuotaExceededError(Exception):
-    def __init__(self, model: str):
+    """Raised on Gemini 429s. Carries the structured fields Google ships in
+    ``error.details`` so the caller can surface a precise retry-after time
+    and the exact quota dimension that was exhausted."""
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        metric: str | None = None,
+        limit: int | None = None,
+        model_from_api: str | None = None,
+        retry_after_seconds: float | None = None,
+        message: str | None = None,
+    ):
         self.model = model
-        super().__init__(f"Quota exceeded for model {model}")
+        self.metric = metric
+        self.limit = limit
+        self.model_from_api = model_from_api or model
+        self.retry_after_seconds = retry_after_seconds
+        self.message = message or f"Quota exceeded for model {model}"
+        super().__init__(self.message)
+
+
+_RETRY_DELAY_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*s\s*$")
+
+
+def _parse_retry_delay(raw) -> float | None:
+    """Accepts the protobuf Duration string form (e.g. ``"6.343969865s"``)
+    or a plain numeric. Returns float seconds or None."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        m = _RETRY_DELAY_RE.match(raw)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _client_error_payload(e: ClientError) -> dict:
+    """Best-effort extraction of the JSON body from a ClientError across
+    SDK versions. Returns ``{}`` if nothing usable is attached."""
+    for attr in ("response_json", "_response_json", "details"):
+        val = getattr(e, attr, None)
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, list):
+            return {"error": {"details": val}}
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        try:
+            return resp.json()
+        except Exception:
+            pass
+    return {}
+
+
+def _parse_quota_error(e: ClientError, requested_model: str) -> "QuotaExceededError":
+    """Walks the documented ``google.rpc.QuotaFailure`` + ``RetryInfo``
+    details on a 429 response and packs them into a QuotaExceededError."""
+    payload = _client_error_payload(e)
+    err = payload.get("error", payload) if isinstance(payload, dict) else {}
+    details = err.get("details", []) if isinstance(err, dict) else []
+
+    metric: str | None = None
+    limit: int | None = None
+    model_from_api: str | None = None
+    retry_after: float | None = None
+
+    for d in details if isinstance(details, list) else []:
+        if not isinstance(d, dict):
+            continue
+        type_url = str(d.get("@type", ""))
+        if type_url.endswith("QuotaFailure"):
+            violations = d.get("violations") or []
+            if violations and isinstance(violations[0], dict):
+                v = violations[0]
+                metric = v.get("quotaMetric") or v.get("quota_metric") or metric
+                raw_limit = v.get("quotaValue") or v.get("quota_value")
+                if raw_limit is not None:
+                    try:
+                        limit = int(raw_limit)
+                    except (TypeError, ValueError):
+                        pass
+                dims = v.get("quotaDimensions") or v.get("quota_dimensions") or {}
+                if isinstance(dims, dict):
+                    model_from_api = dims.get("model") or model_from_api
+        elif type_url.endswith("RetryInfo"):
+            retry_after = _parse_retry_delay(d.get("retryDelay") or d.get("retry_delay")) or retry_after
+
+    message = err.get("message") if isinstance(err, dict) else None
+    return QuotaExceededError(
+        requested_model,
+        metric=metric,
+        limit=limit,
+        model_from_api=model_from_api,
+        retry_after_seconds=retry_after,
+        message=message,
+    )
 
 
 def get_best_available_model(requested: str, usage_today: dict[str, int]) -> str:
@@ -36,6 +138,14 @@ def get_best_available_model(requested: str, usage_today: dict[str, int]) -> str
     raise QuotaExceededError(requested)
 
 
+_SHORT_RETRY_THRESHOLD_S = 10.0
+
+
+def _is_429(e: ClientError) -> bool:
+    code = getattr(e, "status_code", None) or getattr(e, "code", None)
+    return code == 429
+
+
 def call_gemini(prompt: str, model: str = "gemini-2.5-flash-lite", api_key: str = None) -> str:
     if not api_key:
         raise ValueError("A Gemini API key must be provided.")
@@ -44,8 +154,8 @@ def call_gemini(prompt: str, model: str = "gemini-2.5-flash-lite", api_key: str 
         response = client.models.generate_content(model=model, contents=prompt)
         return response.text
     except ClientError as e:
-        if e.status_code == 429:
-            raise QuotaExceededError(model)
+        if _is_429(e):
+            raise _parse_quota_error(e, model)
         raise
 
 
@@ -53,14 +163,34 @@ def call_gemini_stream(prompt: str, model: str, api_key: str) -> Iterator[str]:
     if not api_key:
         raise ValueError("A Gemini API key must be provided.")
     client = genai.Client(api_key=api_key)
-    try:
+
+    def _one_attempt():
         for chunk in client.models.generate_content_stream(model=model, contents=prompt):
             text = getattr(chunk, "text", None)
             if text:
                 yield text
+
+    try:
+        yield from _one_attempt()
+        return
     except ClientError as e:
-        if e.status_code == 429:
-            raise QuotaExceededError(model)
+        if not _is_429(e):
+            raise
+        quota_err = _parse_quota_error(e, model)
+        # Short, bounded retry only when the server tells us to wait briefly.
+        # RPM hits typically clear in single-digit seconds; RPD hits return
+        # large values (seconds-until-midnight-PT) which we surface immediately.
+        wait = quota_err.retry_after_seconds
+        if wait is None or wait > _SHORT_RETRY_THRESHOLD_S:
+            raise quota_err
+        time.sleep(wait + random.uniform(0.1, 0.3))
+
+    # Second attempt — propagate richer error on failure, no further retries.
+    try:
+        yield from _one_attempt()
+    except ClientError as e:
+        if _is_429(e):
+            raise _parse_quota_error(e, model)
         raise
 
 

@@ -8,7 +8,7 @@ import requests as http_requests
 load_dotenv()
 import json as _json
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +40,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["GET"],
     allow_headers=["*"],
+    expose_headers=["x-billed-model"],
 )
 
 
@@ -84,6 +85,7 @@ async def validate(username: str):
 @limiter.limit("30/minute")
 async def get_recs(
     request: Request,
+    response: Response,
     username: str,
     model_choice: str = DEFAULT_MODEL,
     x_gemini_api_key: str = Header(None),
@@ -118,16 +120,29 @@ async def get_recs(
     except Exception:
         raise HTTPException(status_code=502, detail="Failed to reach AniList while fetching candidates. Try again in a moment.")
 
-    # 4. Let Gemini pick the best series, movies, and games
+    # 4. Let Gemini pick the best series, movies, and games.
+    # Mark the call as billed *before* we issue it so the client increments
+    # its counter on ground truth (call attempted), not on success-only.
+    response.headers["x-billed-model"] = model_choice
     try:
         result = finalize_recommendations(candidate_pool, completed, dropped, planning, model_choice, x_gemini_api_key)
     except QuotaExceededError as e:
         raise HTTPException(
             status_code=429,
-            detail=f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model.",
+            detail={
+                "message": e.message,
+                "model": e.model,
+                "model_from_api": e.model_from_api,
+                "metric": e.metric,
+                "limit": e.limit,
+                "retry_after_seconds": e.retry_after_seconds,
+                "billed_model": model_choice,
+            },
+            headers={"x-billed-model": model_choice},
         )
     except Exception:
-        raise HTTPException(status_code=502, detail="Gemini is unavailable right now. Please try again in a moment.")
+        raise HTTPException(status_code=502, detail="Gemini is unavailable right now. Please try again in a moment.",
+                            headers={"x-billed-model": model_choice})
 
     return RecommendationResponse(
         series=[Recommendation.model_validate(r) for r in result.get("series", [])],
@@ -204,6 +219,9 @@ async def get_recs_stream(
             return
 
         yield event({"type": "status", "text": "consulting gemini…"})
+        # Ground-truth signal: we are about to call Gemini with `model_choice`.
+        # Frontend increments its counter on this event, regardless of outcome.
+        yield event({"type": "billed", "model": model_choice})
 
         final_payload = None
         try:
@@ -215,17 +233,28 @@ async def get_recs_stream(
                 else:
                     yield event({"type": "chunk", "text": piece})
         except QuotaExceededError as e:
-            yield event({"type": "error", "status": 429,
-                         "detail": f"Gemini quota exceeded for {e.model}. Try again after midnight UTC or switch to a different model."})
+            yield event({
+                "type": "error",
+                "status": 429,
+                "detail": e.message,
+                "model": e.model,
+                "model_from_api": e.model_from_api,
+                "metric": e.metric,
+                "limit": e.limit,
+                "retry_after_seconds": e.retry_after_seconds,
+                "billed_model": model_choice,
+            })
             return
         except Exception:
             yield event({"type": "error", "status": 502,
-                         "detail": "Gemini is unavailable right now. Please try again in a moment."})
+                         "detail": "Gemini is unavailable right now. Please try again in a moment.",
+                         "billed_model": model_choice})
             return
 
         if final_payload is None:
             yield event({"type": "error", "status": 502,
-                         "detail": "Gemini returned no parseable output."})
+                         "detail": "Gemini returned no parseable output.",
+                         "billed_model": model_choice})
             return
 
         response = RecommendationResponse(
@@ -242,7 +271,7 @@ async def get_recs_stream(
                 recent_fav=profile_stats.get("recent_fav", ""),
             ),
         )
-        yield event({"type": "done", "result": response.model_dump()})
+        yield event({"type": "done", "result": response.model_dump(), "billed_model": model_choice})
 
     return StreamingResponse(
         generate(),
